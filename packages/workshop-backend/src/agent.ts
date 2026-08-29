@@ -14,7 +14,9 @@ import {
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
-import { AgentCatalogSnapshot, formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
+import {
+  AgentCatalogSnapshot, addDynamicCatalogTokenEstimate, formatAlwaysAvailableResourcesPrompt,
+} from "./agent-catalog";
 import { formatInstanceInstructions } from "./admin-config";
 import type { AiGatewayLogRoute } from "./ai-gateway";
 import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
@@ -2218,9 +2220,10 @@ export async function runAgent(
   // was added after it. A tool result carries the call's sequence but wasn't in that usage.
   // (The system prompt is not part of the projection, so the pure estimate adds it separately.)
   let dynamicCatalog = seedBindings.some(seed => seed.dynamicCatalog === true);
-  let contextTokens = !dynamicCatalog && compaction.measuredTokens > 0 &&
-      lastMeasuredSequence !== undefined
-    ? compaction.measuredTokens + estimateProjectionTokens(
+  let contextTokens = compaction.measuredTokens > 0 && lastMeasuredSequence !== undefined
+    ? (dynamicCatalog ? addDynamicCatalogTokenEstimate(
+        compaction.measuredTokens, alwaysAvailableResourcesPrompt) : compaction.measuredTokens) +
+      estimateProjectionTokens(
         projection.filter(({message, sequence}) => sequence !== undefined &&
           (sequence > lastMeasuredSequence ||
            (sequence === lastMeasuredSequence && message.role === "toolResult"))))

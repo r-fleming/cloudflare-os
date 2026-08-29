@@ -4,9 +4,15 @@ import {
   AGENT_CATALOG_MAX_TITLE_LENGTH, boundAgentCatalog,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  completeAgentCatalogSnapshot, formatAgentCatalogPrompt,
+  addDynamicCatalogTokenEstimate, completeAgentCatalogSnapshot, formatAgentCatalogPrompt,
   formatAlwaysAvailableResourcesPrompt, normalizeAgentCatalog,
 } from "../src/agent-catalog";
+
+describe("addDynamicCatalogTokenEstimate", () => {
+  it("keeps measured provider usage as the floor", () => {
+    expect(addDynamicCatalogTokenEstimate(10_000, "x".repeat(401))).toBe(10_101);
+  });
+});
 
 describe("normalizeAgentCatalog", () => {
   it("sorts entries, strips control characters, and truncates long fields to the max bounds", () => {
@@ -166,5 +172,4 @@ describe("completeAgentCatalogSnapshot", () => {
     });
   });
 });
-
 

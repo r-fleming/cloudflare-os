@@ -6,6 +6,7 @@ const AGENT_SKILL_INSTRUCTION_END = "console.log(document.content). ";
 const AGENT_SKILL_PATH_SUFFIX = "/SKILL.md";
 const DEFAULT_SKILL_RESULT_LIMIT = 8;
 const MAX_RETRIEVAL_QUERY_LENGTH = 4000;
+const TRUNCATED_QUERY_SEPARATOR = "\n...\n";
 const RRF_RANK_OFFSET = 60;
 const SEMANTIC_RANKING_TIMEOUT_MS = 3000;
 const LEXICAL_STOP_WORDS = new Set([
@@ -72,15 +73,6 @@ function lexicalScore(entry: AgentCatalogEntry, query: string, queryWords: Set<s
   return score;
 }
 
-function uniqueIndices(...rankings: number[][]): number[] {
-  let seen = new Set<number>();
-  return rankings.flat().filter(index => {
-    if (seen.has(index)) return false;
-    seen.add(index);
-    return true;
-  });
-}
-
 function semanticFailure(error: unknown): SemanticFailure {
   if (error instanceof InvalidSemanticRankingError) return "invalid_response";
   if (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name)) {
@@ -130,14 +122,16 @@ function filteredCatalog(
  * selected and loaded an exact skill, so reranking their generated message would be redundant.
  */
 export function skillRetrievalQuery(messages: AiChatMessage[]): string | undefined {
-  for (let message of messages.toReversed()) {
-    if (message.author.type !== "user") continue;
-    if (message.type !== "message") return undefined;
-    if (message.generatedBySlashCommandSequence !== undefined) return undefined;
-    let query = message.message.trim();
-    return query ? query.slice(0, MAX_RETRIEVAL_QUERY_LENGTH) : undefined;
-  }
-  return undefined;
+  let message = messages.at(-1);
+  if (!message || message.author.type !== "user" || message.type !== "message" ||
+      message.generatedBySlashCommandSequence !== undefined) return undefined;
+  let query = message.message.trim();
+  if (!query) return undefined;
+  if (query.length <= MAX_RETRIEVAL_QUERY_LENGTH) return query;
+  let contentLength = MAX_RETRIEVAL_QUERY_LENGTH - TRUNCATED_QUERY_SEPARATOR.length;
+  let headLength = Math.ceil(contentLength / 2);
+  return query.slice(0, headLength) + TRUNCATED_QUERY_SEPARATOR +
+    query.slice(-(contentLength - headLength));
 }
 
 /** Whether a deployment explicitly enabled the experimental retrieval path. */
@@ -182,20 +176,6 @@ export async function retrieveSkillCatalog(
   }
 
   let lexical = rankLexically(skillEntries, query);
-  let exact = skillEntries
-      .map((entry, index) => ({entry, index}))
-      .filter(({entry}) => isExactMention(entry, query))
-      .map(({index}) => index);
-  if (exact.length > 0) {
-    let ranked = uniqueIndices(exact, lexical);
-    let reduced = filteredCatalog(catalog, collectionEntries, skillEntries, ranked, limit);
-    return {
-      catalog: reduced,
-      strategy: "lexical",
-      skillCount: skillEntries.length,
-      selectedSkillCount: reduced.entries.length - collectionEntries.length,
-    };
-  }
   try {
     let semantic = await semanticRanker(query, skillEntries);
     if (semantic.length === 0 && lexical.length > 0) {
@@ -212,8 +192,7 @@ export async function retrieveSkillCatalog(
       {indices: lexical, weight: 1},
       {indices: semantic, weight: 2},
     ]);
-    let exactSet = new Set(exact);
-    let ranked = [...exact, ...fused.filter(index => !exactSet.has(index))];
+    let ranked = fused;
     if (ranked.length > 0) {
       let reduced = filteredCatalog(
         catalog, collectionEntries, skillEntries, ranked, limit);

@@ -45,6 +45,24 @@ describe("skillRetrievalQuery", () => {
     ])).toBe("latest");
   });
 
+  it("does not reuse a stale user request for non-user turns", () => {
+    expect(skillRetrievalQuery([
+      userMessage("previous request"),
+      {...userMessage("callback"), sequence: 2,
+        author: {type: "gadget", id: "gadget", name: "Gadget"}},
+    ])).toBeUndefined();
+  });
+
+  it("retains both ends of a long request", () => {
+    let query = skillRetrievalQuery([
+      userMessage(`instruction at start ${"x".repeat(5000)} instruction at end`),
+    ]);
+
+    expect(query).toHaveLength(4000);
+    expect(query).toMatch(/^instruction at start/);
+    expect(query).toMatch(/instruction at end$/);
+  });
+
   it("bypasses generated slash-command messages", () => {
     expect(skillRetrievalQuery([userMessage("<agent_skill>...</agent_skill>", true)]))
         .toBeUndefined();
@@ -130,7 +148,7 @@ describe("retrieveSkillCatalog", () => {
     expect(ranker).toHaveBeenCalledOnce();
   });
 
-  it("keeps an explicitly named skill ahead of conflicting semantic ranks", async () => {
+  it("uses a named skill as a lexical signal without bypassing semantic ranking", async () => {
     let ranker = vi.fn(async () => [1, 2, 3, 0]);
     let result = await retrieveSkillCatalog(
       catalog(), "use account-plan", ranker, 1);
@@ -138,7 +156,7 @@ describe("retrieveSkillCatalog", () => {
     expect(result.catalog.entries.map(entry => entry.title)).toEqual([
       "Cloudflare", "account-plan",
     ]);
-    expect(ranker).not.toHaveBeenCalled();
+    expect(ranker).toHaveBeenCalledOnce();
   });
 
   it("uses lexical results when semantic ranking fails", async () => {

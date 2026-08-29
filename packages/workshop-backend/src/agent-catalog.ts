@@ -85,6 +85,11 @@ export function formatAgentCatalogPrompt(catalog: AgentCatalog | null): string {
   return `\n${JSON.stringify(catalog)}`;
 }
 
+/** Conservatively add a turn-specific catalog to provider-measured prior context usage. */
+export function addDynamicCatalogTokenEstimate(measuredTokens: number, prompt: string): number {
+  return measuredTokens + Math.ceil(prompt.length / 4);
+}
+
 /**
  * Build the system-prompt section that tells the agent which always-available resource bindings it
  * has (their `env.NAME` entries) plus each one's discovery catalog, and how to use them. This
