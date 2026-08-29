@@ -124,7 +124,9 @@ function filteredCatalog(
 export function skillRetrievalQuery(messages: AiChatMessage[]): string | undefined {
   let message = messages.at(-1);
   if (!message || message.author.type !== "user" || message.type !== "message" ||
-      message.generatedBySlashCommandSequence !== undefined) return undefined;
+      message.generatedBySlashCommandSequence !== undefined || message.generatedByActionApproval) {
+    return undefined;
+  }
   let query = message.message.trim();
   if (!query) return undefined;
   if (query.length <= MAX_RETRIEVAL_QUERY_LENGTH) return query;

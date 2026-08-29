@@ -9639,7 +9639,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         `The changes you submitted have been approved and applied: ${titleList}. ` +
         `Reads now reflect them.`;
     let author = await this.#getClientProfile();
-    this.impl.addChatMessages(chatId, author, [{type: "message", message: summary}]);
+    this.impl.addChatMessages(chatId, author, [{
+      type: "message", message: summary, generatedByActionApproval: true,
+    }]);
 
     await this.#resumeSuspendedAgent(chatId);
   }

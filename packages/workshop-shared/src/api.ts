@@ -2590,6 +2590,9 @@ export type AiChatMessageBody = {
    * Clients use this to group the two records for display.
    */
   generatedBySlashCommandSequence?: number;
+
+  /** True when the backend generated this message to resume after approved agent actions. */
+  generatedByActionApproval?: true;
 } | {
   /**
    * A slash command exactly as requested by the client, retained for display and never included in

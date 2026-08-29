@@ -68,6 +68,13 @@ describe("skillRetrievalQuery", () => {
         .toBeUndefined();
   });
 
+  it("bypasses generated action-approval resumes", () => {
+    expect(skillRetrievalQuery([{
+      ...userMessage("The changes you submitted have been approved and applied."),
+      generatedByActionApproval: true,
+    }])).toBeUndefined();
+  });
+
   it("does not reuse a previous query for a built-in slash command", () => {
     expect(skillRetrievalQuery([
       userMessage("previous request"),
