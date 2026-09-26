@@ -1,7 +1,7 @@
 # Approvals
 
-People submit requests; an approver other than the requester approves or rejects them. The audit
-trail records who did what.
+People submit requests; an approver other than the requester approves or rejects them. The
+History section shows who did what.
 
 ## Identity
 
@@ -16,7 +16,13 @@ the `ApprovalSession` returned for that viewer. Keep it that way when editing:
 
 ## Rules
 
-- The owner is always an approver and chooses other approvers from the People list (anyone who has
-  opened the gadget).
+- `build` viewers (the owner and anyone who can edit this gadget) are always approvers, and choose
+  other approvers from the People list (anyone who has opened the gadget).
 - Nobody can decide their own request.
-- These rules bind `use` collaborators. `owner` and `build` viewers can edit this code.
+
+## What these rules are worth
+
+The Workshop vouches for who each viewer is; the rules above are this gadget's own. They bind
+`use` collaborators only. Anyone who can change this gadget's code or data -- `build` viewers, and
+any agent they run -- can bypass them, and can rewrite the stored requests and History. History is
+app data, not a tamper-proof audit log.

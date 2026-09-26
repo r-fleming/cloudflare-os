@@ -5,7 +5,7 @@ export type Viewer = {
   /** Opaque, stable for this person within this workspace. */
   id: string;
   displayName: string;
-  role: "owner" | "build" | "use";
+  role: "build" | "use";
 };
 
 /** A person as recorded on a request or decision. */

@@ -1,5 +1,5 @@
 {
-  "$comment": "Demonstrates connectViewer(): the Workshop tells the gadget who each connection belongs to, so requests are attributed to verified people and nobody can approve their own.",
+  "$comment": "Demonstrates connectViewer(): the Workshop tells the gadget who each connection belongs to, so requests are attributed to signed-in people and nobody can approve their own. Its rules bind use collaborators only; builders can change its code and data.",
   "blueprintId": "demo.approvals",
   "title": "Approvals",
   "description": "Submit requests and have them approved by someone else. Every request and decision is attributed to the signed-in person who made it.",

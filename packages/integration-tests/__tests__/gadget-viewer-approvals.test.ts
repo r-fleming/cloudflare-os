@@ -2,6 +2,7 @@
 // Workshop (connectViewer), not from the browser. Drives the bundled Approvals demo blueprint with
 // an owner and a "use" collaborator, each on their own authenticated connection.
 
+import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { type Harness, startHarness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
@@ -40,6 +41,25 @@ type View = {
   }[];
 };
 
+type Viewer = { id: string; displayName: string; role: string };
+
+// The Approvals session as a connection sees it (see the blueprint's lib/protocol.ts), plus the
+// reserved handshake, which a connection must not be able to call.
+type Session = {
+  whoami(): Viewer;
+  connectViewer(viewer: Viewer): unknown;
+  subscribe(listener: Listener): View;
+  submit(title: string, detail: string): void;
+  decide(requestId: string, outcome: string, note: string): void;
+  setApprover(memberId: string, approver: boolean): void;
+};
+
+// connectToGadget() is typed for any gadget; narrow it to this one's session.
+async function connectSession(gadget: { connectToGadget(): Promise<unknown> })
+    : Promise<RpcStub<Session>> {
+  return await gadget.connectToGadget() as RpcStub<Session>;
+}
+
 // What the client's listener sees: the latest view the gadget pushed to this connection.
 class Listener extends RpcTarget {
   latest: View | undefined;
@@ -63,15 +83,15 @@ it("attributes requests and decisions to the signed-in people, not the browser",
   await workspace.addCollaborator(requesterName, "use", "requester");
 
   using ownerGadget = await workspace.getGadget(defaultGadgetId);
-  using ownerSession = await ownerGadget.connectToGadget();
+  using ownerSession = await connectSession(ownerGadget);
   using requesterWorkspace = await requester.openGadget(workspaceId);
   using requesterGadget = await requesterWorkspace.getGadget(defaultGadgetId);
-  using requesterSession = await requesterGadget.connectToGadget();
+  using requesterSession = await connectSession(requesterGadget);
 
   // Each connection is its own person, as the Workshop knows them.
   const ownerMe = await ownerSession.whoami();
   const requesterMe = await requesterSession.whoami();
-  expect(ownerMe).toMatchObject({ displayName: ownerName, role: "owner" });
+  expect(ownerMe).toMatchObject({ displayName: ownerName, role: "build" });
   expect(requesterMe).toMatchObject({ displayName: requesterName, role: "use" });
   expect(requesterMe.id).not.toBe(ownerMe.id);
   expect(requesterMe.id).not.toContain(requesterName);
@@ -94,7 +114,7 @@ it("attributes requests and decisions to the signed-in people, not the browser",
   await expect(requesterSession.decide(request.id, "approved", ""))
       .rejects.toThrow("can't decide your own request");
   await expect(requesterSession.setApprover(requesterMe.id, true))
-      .rejects.toThrow("Only the owner chooses approvers");
+      .rejects.toThrow("Only builders choose approvers");
 
   // The owner approves it, and the requester sees who did.
   await ownerSession.decide(request.id, "approved", "Go for it.");
@@ -104,8 +124,9 @@ it("attributes requests and decisions to the signed-in people, not the browser",
     outcome: "approved", by: { id: ownerMe.id, name: ownerName },
   }));
 
-  // Separation of duties cuts both ways: the owner can't approve their own request either, but an
-  // approver they designate can.
+  // Separation of duties cuts both ways: the owner (a builder) can't approve their own request
+  // through the gadget either, but an approver they designate can. (A builder could change the
+  // gadget's code to allow it; the rules bind "use" viewers only.)
   await ownerSession.submit("Team offsite", "");
   const ownRequest = await waitFor("the owner's request", async () =>
     ownerView.latest?.requests.find(each => each.title === "Team offsite") ?? null);

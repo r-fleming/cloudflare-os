@@ -39,7 +39,7 @@ button.primary { background: #1d1d1b; color: #fff; border-color: #1d1d1b; }
 .error { background: #fbe3e1; color: #9b2c22; border-radius: 8px; padding: 8px 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #c9c9c4; display: inline-block; }
 .dot.online { background: #2f9e55; }
-ol.audit { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+ol.history { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
 @media print {
   body { background: #fff; }
   .compose, .actions, .error, input[type=checkbox] { display: none !important; }
@@ -87,9 +87,9 @@ let compose = el("section", { className: "compose" },
     el("div", { className: "row" }, submitButton));
 let requestsSection = el("section");
 let peopleSection = el("section");
-let auditSection = el("section");
+let historySection = el("section");
 document.body.append(el("main", {}, header, errorBox, compose, requestsSection, peopleSection,
-    auditSection));
+    historySection));
 
 function renderRequests(view: View) {
   let items = view.requests.map(request => {
@@ -134,7 +134,7 @@ function renderPeople(view: View) {
         el("span", { className: member.online ? "dot online" : "dot" }),
         el("span", { textContent: member.name }),
         el("span", { className: "pill", textContent: member.role }));
-    if (view.canManageApprovers && member.role !== "owner") {
+    if (view.canManageApprovers && member.role !== "build") {
       let toggle = el("input", { type: "checkbox", checked: member.approver });
       toggle.onchange = () => attempt(() => gadget.setApprover(member.id, toggle.checked));
       row.append(el("label", { className: "row muted" }, toggle, "approver"));
@@ -146,14 +146,14 @@ function renderPeople(view: View) {
   peopleSection.replaceChildren(el("h2", { textContent: "People" }), ...rows);
 }
 
-function renderAudit(view: View) {
+function renderHistory(view: View) {
   let events = view.requests.flatMap(request => [
     { at: request.createdAt, text: `${request.requester.name} requested “${request.title}”` },
     ...(request.decision ? [{ at: request.decision.at,
       text: `${request.decision.by.name} ${request.decision.outcome} “${request.title}”` }] : []),
   ]).sort((a, b) => a.at.localeCompare(b.at));
-  auditSection.replaceChildren(el("h2", { textContent: "Audit trail" }),
-      el("ol", { className: "audit" },
+  historySection.replaceChildren(el("h2", { textContent: "History" }),
+      el("ol", { className: "history" },
           ...events.map(event => el("li", {}, `${event.text} `,
               el("span", { className: "muted", textContent: when(event.at) })))));
 }
@@ -165,7 +165,7 @@ function render(view: View) {
           view.me.approver ? " · approver" : ""));
   renderRequests(view);
   renderPeople(view);
-  renderAudit(view);
+  renderHistory(view);
 }
 
 class Listener extends RpcTarget implements ViewListener {

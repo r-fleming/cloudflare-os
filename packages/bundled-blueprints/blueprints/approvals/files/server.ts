@@ -20,9 +20,13 @@ import type {
  * call `connectViewer()`: the agent, other gadgets and browsers all reach this class through stubs
  * that refuse it.
  *
- * Rules (enforced for "use" viewers; "owner" and "build" viewers can edit this code anyway):
- * - The owner is always an approver, and chooses other approvers among people who have connected.
+ * Rules:
+ * - "build" viewers (the owner among them) are always approvers, and choose other approvers among
+ *   people who have connected.
  * - Nobody decides their own request.
+ *
+ * These rules bind "use" viewers only. Anyone who can change this gadget's code or data -- "build"
+ * viewers and any agent they run -- can bypass them and rewrite the stored requests and history.
  */
 
 type StoredMember = { name: string; role: Viewer["role"]; approver: boolean };
@@ -91,7 +95,7 @@ export class Gadget extends DurableObject<unknown> {
   }
 
   #isApprover(viewer: Viewer): boolean {
-    return viewer.role === "owner" || this.#state.members[viewer.id]?.approver === true;
+    return viewer.role === "build" || this.#state.members[viewer.id]?.approver === true;
   }
 
   #viewFor(viewer: Viewer): View {
@@ -107,10 +111,10 @@ export class Gadget extends DurableObject<unknown> {
         id,
         name: member.name,
         role: member.role,
-        approver: member.role === "owner" || member.approver,
+        approver: member.role === "build" || member.approver,
         online: online.has(id),
       })),
-      canManageApprovers: viewer.role === "owner",
+      canManageApprovers: viewer.role === "build",
     };
   }
 
@@ -154,10 +158,10 @@ export class Gadget extends DurableObject<unknown> {
   }
 
   async #setApprover(viewer: Viewer, memberId: string, approver: boolean): Promise<void> {
-    if (viewer.role !== "owner") throw new Error("Only the owner chooses approvers.");
+    if (viewer.role !== "build") throw new Error("Only builders choose approvers.");
     let member = this.#state.members[memberId];
     if (!member) throw new Error("No such person.");
-    if (member.role === "owner") throw new Error("The owner is always an approver.");
+    if (member.role === "build") throw new Error("Builders are always approvers.");
     member.approver = approver === true;
     await this.#commit();
   }
