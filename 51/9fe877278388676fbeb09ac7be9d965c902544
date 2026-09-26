@@ -1,0 +1,27 @@
+packages/bundled-blueprints/blueprints/approvals/blueprint.json
+  s_c630575fa29d65::t_25ef02a7b3a530 2
+packages/bundled-blueprints/blueprints/approvals/files/client.ts
+  s_c630575fa29d65::t_e8d160d34e7f82 42,90,92,137,149,155-156,168
+packages/bundled-blueprints/blueprints/approvals/files/lib/protocol.ts
+  s_c630575fa29d65::t_b15fc3ca38ea7d 8
+packages/bundled-blueprints/blueprints/approvals/files/server.ts
+  s_c630575fa29d65::t_b5bb3ada254639 23-25,27-29,98,114,117,161,164
+packages/integration-tests/__tests__/gadget-viewer-approvals.test.ts
+  s_c630575fa29d65::t_c8d77da478eee9 5,44-62,86,89,94,117,127-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "519fe877278388676fbeb09ac7be9d965c902544",
+  "prompts": {},
+  "sessions": {
+    "s_c630575fa29d65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f264500beffeSTbDtmYgswQVRn",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
