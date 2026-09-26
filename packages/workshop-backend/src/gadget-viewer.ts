@@ -11,7 +11,14 @@ import type { DurableObject, RpcTarget } from "cloudflare:workers";
  */
 export const GADGET_VIEWER_METHOD = "connectViewer";
 
-/** The person behind one connectToGadget() connection, as established by the Workshop. */
+/**
+ * The person behind one connectToGadget() connection, as established by the Workshop.
+ *
+ * The Workshop authenticates the viewer; the gadget authorizes. A gadget's rules and stored
+ * records are only as trustworthy as everyone who can change its code or data: its "build"
+ * collaborators (the owner among them) and any agent they run, including unmerged code an agent
+ * tests against the gadget's live storage. So a gadget's own rules bind "use" viewers only.
+ */
 export type GadgetViewer = {
   /**
    * Opaque id, stable for this person within this workspace. It cannot be computed from their
@@ -23,10 +30,11 @@ export type GadgetViewer = {
   displayName: string;
 
   /**
-   * The access this connection was admitted with, already enforced by the Workshop. "owner" and
-   * "build" viewers can edit the gadget's code, so a gadget cannot hold them to its own rules.
+   * The access this connection was admitted with, already enforced by the Workshop (the owner
+   * connects as "build"). A "build" viewer can change the gadget's code, so the gadget cannot hold
+   * them to its own rules.
    */
-  role: "owner" | "build" | "use";
+  role: "build" | "use";
 };
 
 /** A gadget facet that implements the GADGET_VIEWER_METHOD handshake. */

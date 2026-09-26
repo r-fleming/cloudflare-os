@@ -10998,7 +10998,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async #viewer(): Promise<GadgetViewer> {
-    return this.impl.gadgetViewer(this.clientProfileId, this.isOwner ? "owner" : "build",
+    return this.impl.gadgetViewer(this.clientProfileId, "build",
         (await this.#getClientProfile()).name);
   }
 
