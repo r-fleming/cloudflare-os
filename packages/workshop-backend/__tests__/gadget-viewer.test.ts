@@ -148,7 +148,9 @@ describe("viewer ids", () => {
 });
 
 // Which viewer each kind of session presents: the session's own profile, with the role it was
-// admitted with.
+// admitted with. The owner presents as "build": gadget code can't hold the owner to anything a
+// build collaborator couldn't also undo, so the distinction would only invite rules that don't
+// hold.
 describe("connectToGadget() presents the session's viewer", () => {
   async function connectAs(role: "owner" | "build" | "use") {
     let presented: unknown[] = [];
@@ -183,7 +185,7 @@ describe("connectToGadget() presents the session's viewer", () => {
 
   it("as the owner", async () => {
     expect(await connectAs("owner")).toEqual(
-        [{ profileId: "owner-id-profile", role: "owner", displayName: "Test User" }]);
+        [{ profileId: "owner-id-profile", role: "build", displayName: "Test User" }]);
   });
 
   it("as a build collaborator", async () => {
