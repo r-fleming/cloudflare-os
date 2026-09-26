@@ -1,0 +1,22 @@
+{
+  "$comment": "Demonstrates connectViewer(): the Workshop tells the gadget who each connection belongs to, so requests are attributed to verified people and nobody can approve their own.",
+  "blueprintId": "demo.approvals",
+  "title": "Approvals",
+  "description": "Submit requests and have them approved by someone else. Every request and decision is attributed to the signed-in person who made it.",
+  "output": {
+    "id": "approvals",
+    "noun": "Approvals",
+    "plural": "Approvals",
+    "icon": "listChecks"
+  },
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 1,
+  "created": "2026-09-26T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-09-26T00:00:00.000Z",
+  "bindings": {}
+}
