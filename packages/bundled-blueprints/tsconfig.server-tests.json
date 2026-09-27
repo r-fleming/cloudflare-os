@@ -15,8 +15,7 @@
 // bindings. At run time the tests get `cloudflare:workers` as a stub of its base classes (see
 // vitest.config.ts); the types here are the real ones.
 //
-// `files: []` alongside `include`: a blueprint set with no server tests is a valid state, and
-// without it tsc reports "no inputs found" as an error.
+// `files` declares `gadgets:user`, the module the Workshop adds to every gadget worker.
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
@@ -33,7 +32,7 @@
     "types": ["node", "@cloudflare/workers-types/experimental"],
     "noEmit": true
   },
-  "files": [],
+  "files": ["types/gadgets-user.d.ts"],
   "include": [
     "blueprints/*/__tests__/**/server.test.ts",
     "blueprints/*/__tests__/**/*.server.test.ts",
