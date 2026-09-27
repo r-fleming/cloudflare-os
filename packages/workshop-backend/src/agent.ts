@@ -851,30 +851,23 @@ If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:worke
 
 ## Knowing who is connected
 
-The Workshop knows which signed-in person each client connection belongs to. To learn it, give the \`Gadget\` class a \`connectViewer(viewer)\` method that returns an \`RpcTarget\`. The Workshop calls it once per connection, and the client's \`gadget\` stub then points at the returned session instead of at the \`Gadget\` itself (a reconnect opens a new session). \`viewer\` is \`{id, displayName, role}\`: \`id\` is an opaque string, stable for that person within this workspace; \`role\` is \`"build"\` (the owner and anyone who can edit the Gadget) or \`"use"\` (may only use its UI). Only the Workshop can call \`connectViewer\`; you cannot call it from \`executeCode\`.
+To learn which signed-in user a client connection belongs to, give the \`Gadget\` class a \`connectViewer(viewer)\` method returning an \`RpcTarget\`. The Workshop calls it once per connection, and the client's \`gadget\` stub then points at that session instead of the \`Gadget\`. \`viewer\` is \`{id, displayName, role}\`: \`id\` is opaque and stable for that user in this workspace; \`displayName\` is not unique; \`role\` is \`"build"\` (can edit the Gadget, including the owner) or \`"use"\`. Only the Workshop can call \`connectViewer\`.
 
 \`\`\`
 export class Gadget extends DurableObject {
-  connectViewer(viewer) {
-    return new Session(this, viewer);
-  }
+  connectViewer(viewer) { return new Session(this, viewer); }
 }
 
 class Session extends RpcTarget {
   #gadget; #viewer;
   constructor(gadget, viewer) { super(); this.#gadget = gadget; this.#viewer = viewer; }
   whoami() { return this.#viewer; }
-  async addComment(text) {
-    // The author comes from the session, never from a parameter.
-    ...
-  }
-  [Symbol.dispose]() {
-    // The connection closed.
-  }
+  async addComment(text) { /* the author is this.#viewer, never a parameter */ }
+  [Symbol.dispose]() { /* the connection closed */ }
 }
 \`\`\`
 
-Never accept a user's identity as a method parameter, and do not add public \`Gadget\` methods that take a user or viewer id: anything public on the \`Gadget\` class can be called by code that is not a viewer (such as your own \`executeCode\`). Do viewer-specific work in the session. The Workshop vouches for who a viewer is; what they may do is up to the Gadget. But anyone who can change the Gadget's code or data -- \`"build"\` viewers, and any agent they run, including you -- can bypass its rules and rewrite what it has stored, so those rules only bind \`"use"\` viewers, and records the Gadget keeps (such as a history of who did what) are app data, not a tamper-proof log. If the Gadget has no \`connectViewer\` method, clients connect to the \`Gadget\` directly, as described above.
+Never take a user's identity as a method parameter: public \`Gadget\` methods are also callable by non-viewers such as \`executeCode\`. A Gadget's rules bind \`"use"\` viewers only, since \`"build"\` viewers and their agents can change its code and data.
 
 ## Design Tips
 

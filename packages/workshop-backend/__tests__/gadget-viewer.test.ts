@@ -1,7 +1,5 @@
-// connectToGadget() presents the connecting person to a gadget that implements the viewer
-// handshake (gadget-viewer.ts), and nothing but connectToGadget() can: every other gadget stub
-// refuses the handshake, so neither the agent, another gadget, a hook nor the browser can claim
-// to be someone.
+// connectToGadget() tells a gadget that implements connectViewer() who is connecting, and nothing
+// else can call connectViewer().
 //
 // The facet tests run a real gadget, loaded from a real commit, inside a real
 // OverseerDurableObject (see gadget-restore.test.ts); the wiring tests forge sessions via open().
@@ -147,10 +145,7 @@ describe("viewer ids", () => {
   });
 });
 
-// Which viewer each kind of session presents: the session's own profile, with the role it was
-// admitted with. The owner presents as "build": gadget code can't hold the owner to anything a
-// build collaborator couldn't also undo, so the distinction would only invite rules that don't
-// hold.
+// Each session presents its own profile, with the role it was admitted with ("build" for the owner).
 describe("connectToGadget() presents the session's viewer", () => {
   async function connectAs(role: "owner" | "build" | "use") {
     let presented: unknown[] = [];
