@@ -849,31 +849,25 @@ DO NOT import \`RpcTarget\` in client.js. It is already imported.
 
 If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:workers".
 
-## Knowing who is connected
+## Knowing who is calling
 
-To learn which signed-in user a client connection belongs to, give the \`Gadget\` class a \`connectViewer(viewer)\` method returning an \`RpcTarget\`. The Workshop calls it once per connection, and the client's \`gadget\` stub then points at that session instead of the \`Gadget\`. \`viewer\` is \`{id, displayName, role}\`: \`id\` is opaque and stable for that user in this workspace; \`displayName\` is not unique; \`role\` is \`"build"\` (can edit the Gadget, including the owner) or \`"use"\`. Only the Workshop can call \`connectViewer\`.
+In server code, \`import { viewer } from "gadgets:viewer"\`. During a \`Gadget\` method called by a client, \`viewer()\` returns the signed-in user whose connection made the call: \`{id, displayName, role}\`. \`id\` is opaque and stable for that user in this workspace; \`displayName\` is not unique; \`role\` is \`"build"\` (can edit the Gadget, including the owner) or \`"use"\`. It returns \`null\` for calls from \`executeCode\`, hooks and other gadgets, and inside methods of objects a \`Gadget\` method returned.
 
 \`\`\`
-export class Gadget extends DurableObject {
-  connectViewer(viewer) { return new Session(this, viewer); }
-}
-
-class Session extends RpcTarget {
-  #gadget; #viewer;
-  constructor(gadget, viewer) { super(); this.#gadget = gadget; this.#viewer = viewer; }
-  whoami() { return this.#viewer; }
-  async addComment(text) { /* the author is this.#viewer, never a parameter */ }
-  [Symbol.dispose]() { /* the connection closed */ }
+async addComment(text) {
+  let me = viewer();
+  if (!me) throw new Error("Only people can comment.");
+  await this.ctx.storage.put(\`comment:\${Date.now()}\`, { text, authorId: me.id, author: me.displayName });
 }
 \`\`\`
 
-Never take a user's identity as a method parameter: public \`Gadget\` methods are also callable by non-viewers such as \`executeCode\`. A Gadget's rules bind \`"use"\` viewers only, since \`"build"\` viewers and their agents can change its code and data.
+Record \`id\`, not names, and never take a user's identity as a method parameter. A Gadget's rules bind \`"use"\` viewers only, since \`"build"\` viewers and their agents can change its code and data. For per-connection state or to learn when a connection closes, a \`Gadget\` may define \`connectViewer(viewer)\` returning an \`RpcTarget\`: the client then talks to that object instead, and its \`[Symbol.dispose]\` runs when the connection closes.
 
 ## Design Tips
 
 * ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
-* Clients may frequently reload, and there is no client-side storage. When a Gadget needs to know who a client is (authorship, assignments, approvals, a player seat that survives reloads), use \`connectViewer\` (see above) rather than asking the user to type a name. Otherwise, for example in a casual multiplayer game, it's fine to let any connected client choose to be any player.
+* Clients may frequently reload, and there is no client-side storage. When a Gadget needs to know who a client is (authorship, assignments, approvals, a player seat that survives reloads), use \`viewer()\` (see above) rather than asking the user to type a name. Otherwise, for example in a casual multiplayer game, it's fine to let any connected client choose to be any player.
 * If a Gadget contains a README.md file, use it to describe that Gadget at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
 
 ## Exporting files from Gadgets
