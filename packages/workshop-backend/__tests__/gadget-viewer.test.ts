@@ -1,10 +1,10 @@
-// connectToGadget() tells a gadget that implements connectViewer() who is connecting, and nothing
-// else can call connectViewer().
+// connectToGadget() tells a gadget's code who is calling, through viewer() or the gadget's own
+// connectViewer(), and nothing else can present a viewer.
 //
 // The facet tests run a real gadget, loaded from a real commit, inside a real
 // OverseerDurableObject (see gadget-restore.test.ts); the wiring tests forge sessions via open().
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { OverseerDurableObject } from "../src/overseer.js";
@@ -19,19 +19,42 @@ declare module "cloudflare:workers" {
 
 const GADGET_ID = 1;
 
-const VIEWER_AWARE_JS = `
+// A gadget written before viewers existed.
+const PLAIN_JS = `
 import { DurableObject, RpcTarget } from "cloudflare:workers";
+class Counter extends RpcTarget { n = 0; inc() { return ++this.n; } }
+export class Gadget extends DurableObject {
+  count = 0;
+  hello() { return "hi"; }
+  bump() { return ++this.count; }
+  counter() { return new Counter(); }
+  fails() { throw new Error("boom"); }
+}
+`;
 
+const VIEWER_JS = `
+import { DurableObject } from "cloudflare:workers";
+import { viewer } from "gadgets:viewer";
+export class Gadget extends DurableObject {
+  who() { return viewer(); }
+  async slowWho(ms) {
+    await new Promise(resolve => setTimeout(resolve, ms));
+    await this.ctx.storage.get("x");
+    return viewer()?.id ?? null;
+  }
+}
+`;
+
+const SESSION_JS = `
+import { DurableObject, RpcTarget } from "cloudflare:workers";
 export class Gadget extends DurableObject {
   connected = new Set();
-  hello() { return "hi"; }
   connectedViewers() { return [...this.connected]; }
   connectViewer(viewer) {
     if (viewer.displayName === "Refused") throw new Error("not welcome");
     return new Session(this, viewer);
   }
 }
-
 class Session extends RpcTarget {
   #gadget; #viewer;
   constructor(gadget, viewer) {
@@ -45,21 +68,21 @@ class Session extends RpcTarget {
 }
 `;
 
-const PLAIN_JS = `
-import { DurableObject } from "cloudflare:workers";
-export class Gadget extends DurableObject { hello() { return "hi"; } }
-`;
-
 const ALICE: GadgetViewer = { id: "v-alice", displayName: "Alice", role: "use" };
+const BOB: GadgetViewer = { id: "v-bob", displayName: "Bob", role: "use" };
 
 let doCounter = 0;
 
-async function withGadget(serverJs: string, fn: (impl: any) => Promise<void>,
-    name = `gadget-viewer-${++doCounter}`): Promise<void> {
-  await runInDurableObject(env.TEST_OVERSEER.getByName(name),
+async function withGadget(files: Record<string, string>,
+    fn: (impl: any, logged: string[]) => Promise<void>): Promise<void> {
+  await runInDurableObject(env.TEST_OVERSEER.getByName(`gadget-viewer-${++doCounter}`),
       async (instance: OverseerDurableObject) => {
     let impl = (instance as unknown as { impl: any }).impl;
-    let commitId = await impl.gitStore.writeFilesAsCommit(new Map([["server.js", serverJs]]), {
+    let logged: string[] = [];
+    impl.deliverGadgetLogs = async (_chatId: number | null, events: { message: unknown[] }[]) => {
+      logged.push(...events.map(event => String(event.message[0])));
+    };
+    let commitId = await impl.gitStore.writeFilesAsCommit(new Map(Object.entries(files)), {
       parents: [],
       author: { name: "Alice", email: "alice@example.com" },
       message: "test commit",
@@ -69,62 +92,89 @@ async function withGadget(serverJs: string, fn: (impl: any) => Promise<void>,
       type: "gadget", id: GADGET_ID, title: "G", created: new Date(0), bindingName: "G",
       bindings: {}, commitId,
     });
-    await fn(impl);
+    await fn(impl, logged);
   });
 }
 
-describe("the viewer handshake", () => {
-  it("hands a viewer-aware gadget's session to the connection",
-      () => withGadget(VIEWER_AWARE_JS, async impl => {
+// The error a native RPC call fails with. (Unlike `expect().rejects`, handling the RpcPromise's
+// rejection directly keeps it from also being reported as unhandled.)
+function rejection(call: Promise<unknown>): Promise<string | null> {
+  return call.then(() => null, (error: unknown) => String(error));
+}
+
+describe("viewer connections", () => {
+  it("reach a gadget that knows nothing of viewers unchanged",
+      () => withGadget({ "server.js": PLAIN_JS }, async (impl, logged) => {
+    using session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
+    using facet = await impl.getGadgetFacet(GADGET_ID);
+    expect(await session.hello()).toBe("hi");
+    expect(await session.bump()).toBe(1);
+    expect(await facet.bump()).toBe(2);
+    using counter = await session.counter();
+    expect(await counter.inc()).toBe(1);
+    expect(await rejection(session.fails())).toContain("boom");
+    expect(logged).toEqual([expect.stringMatching(/boom[\s\S]*at fails\(\)/)]);
+  }));
+
+  it("tell gadget code who made each call, and nobody for other callers",
+      () => withGadget({ "server.js": VIEWER_JS }, async impl => {
+    using alice = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
+    using bob = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, BOB);
+    using facet = await impl.getGadgetFacet(GADGET_ID);  // what the agent, hooks, etc. get
+    expect(await alice.who()).toEqual(ALICE);
+    expect(await facet.who()).toBe(null);
+    expect(await Promise.all([alice.slowWho(40), bob.slowWho(5), facet.slowWho(20)]))
+        .toEqual(["v-alice", "v-bob", null]);
+  }));
+
+  it("refuse connectViewer through every stub", () => withGadget({ "server.js": VIEWER_JS },
+      async impl => {
+    using facet = await impl.getGadgetFacet(GADGET_ID);
+    using session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
+    for (let stub of [facet, session]) {
+      expect(await rejection(stub.connectViewer(BOB)))
+          .toContain("can only be called by the Workshop");
+    }
+  }));
+
+  it("don't load a gadget that is never called", () => withGadget({ "client.js": "0" },
+      async (impl, logged) => {
+    using _session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(logged).toEqual([]);
+  }));
+
+  it("fail on use, not on connect, when server.js is broken",
+      () => withGadget({ "server.js": "export class Gadget {" }, async impl => {
+    using session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
+    expect(await rejection(session.hello())).toContain("Failed to start Worker");
+  }));
+});
+
+describe("a gadget's own connectViewer()", () => {
+  it("opens the connection's session", () => withGadget({ "server.js": SESSION_JS }, async impl => {
     using session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
     expect(await session.whoami()).toEqual(ALICE);
   }));
 
-  it("tells the gadget when the connection's session ends",
-      () => withGadget(VIEWER_AWARE_JS, async impl => {
+  it("learns when the session ends", () => withGadget({ "server.js": SESSION_JS }, async impl => {
     using facet = await impl.getGadgetFacet(GADGET_ID);
     let session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
+    await session.whoami();
     expect(await facet.connectedViewers()).toEqual(["v-alice"]);
-
     session[Symbol.dispose]();
-    await new Promise(resolve => setTimeout(resolve, 10));
-    expect(await facet.connectedViewers()).toEqual([]);
+    await vi.waitFor(async () => expect(await facet.connectedViewers()).toEqual([]));
   }));
 
-  it("is refused through every stub it hands out", () => withGadget(VIEWER_AWARE_JS, async impl => {
-    // What the agent, other gadgets, hooks and exports receive: no viewer.
-    using facet = await impl.getGadgetFacet(GADGET_ID);
-    expect(await facet.hello()).toBe("hi");
-    await expect(facet.connectViewer({ ...ALICE, id: "v-mallory" }))
-        .rejects.toThrow("can only be called by the Workshop");
-
-    // Nor can a connected viewer open a second session as someone else.
-    using session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
-    await expect(session.connectViewer({ ...ALICE, id: "v-mallory" }))
-        .rejects.toThrow("can only be called by the Workshop");
-  }));
-
-  it("connects a gadget without the handshake to the gadget itself",
-      () => withGadget(PLAIN_JS, async impl => {
-    using facet = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
-    expect(await facet.hello()).toBe("hi");
-  }));
-
-  it("does not fall back to the gadget itself when the handshake turns a viewer away",
-      () => withGadget(VIEWER_AWARE_JS, async impl => {
-    let logged: unknown[] = [];
-    impl.deliverGadgetLogs = async (_chatId: number | null, events: { message: unknown[] }[]) => {
-      logged.push(...events.map(event => String(event.message[0])));
-    };
-    await expect(impl.getGadgetFacet(GADGET_ID, undefined, undefined,
-        { ...ALICE, displayName: "Refused" })).rejects.toThrow("not welcome");
-    // ...and the gadget's author sees why in the console, as for any other gadget method error.
-    expect(logged).toEqual([expect.stringMatching(/not welcome[\s\S]*at connectViewer\(\)/)]);
+  it("can turn a viewer away", () => withGadget({ "server.js": SESSION_JS }, async impl => {
+    using session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined,
+        { ...ALICE, displayName: "Refused" });
+    expect(await rejection(session.whoami())).toContain("not welcome");
   }));
 });
 
 describe("viewer ids", () => {
-  it("are stable per person within a workspace and opaque", () => withGadget(PLAIN_JS, async impl => {
+  it("are stable per person within a workspace and opaque", () => withGadget({ "server.js": PLAIN_JS }, async impl => {
     let a1 = await impl.gadgetViewer("alice@example.com", "use", "Alice");
     let a2 = await impl.gadgetViewer("alice@example.com", "build", "Alice B.");
     let b = await impl.gadgetViewer("bob@example.com", "use", "Bob");
@@ -137,7 +187,7 @@ describe("viewer ids", () => {
   it("differ across workspaces", async () => {
     let ids: string[] = [];
     for (let i = 0; i < 2; i++) {
-      await withGadget(PLAIN_JS, async impl => {
+      await withGadget({ "server.js": PLAIN_JS }, async impl => {
         ids.push((await impl.gadgetViewer("alice@example.com", "use", "Alice")).id);
       });
     }
