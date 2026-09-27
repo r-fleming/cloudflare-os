@@ -14,6 +14,9 @@ the `ApprovalSession` returned for that viewer. Keep it that way when editing:
 - Public `Gadget` methods are reachable by the agent and other gadgets, which are not viewers, so
   they must not act as anyone (`listRequests()` only reads).
 
+Display names are chosen by each user and needn't be unique, so the UI shows the start of each
+person's viewer id beside their name ("alice (#3f9a1c)"). Compare ids, never names.
+
 ## Rules
 
 - `build` viewers (the owner and anyone who can edit this gadget) are always approvers, and choose
