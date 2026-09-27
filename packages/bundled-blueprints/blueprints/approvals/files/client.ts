@@ -1,16 +1,27 @@
 // Approvals client. It never tells the server who it is: the Workshop already has, and `gadget` is
 // the session the server opened for this signed-in viewer (see server.ts).
+//
+// On a Workshop that doesn't introduce viewers, `gadget` is the Gadget itself instead. The client
+// then asks the person who they are and opens a session as whoever they claim to be -- which is
+// all an app can do there, and is what this demo contrasts with. See README.md.
 
-import type { ApprovalSessionApi, Outcome, View, ViewListener } from "./lib/protocol.ts";
+import type { ApprovalSessionApi, Outcome, View, ViewListener, Viewer } from "./lib/protocol.ts";
 
 type Remote<T> = {
   [K in keyof T]: T[K] extends (...args: infer A) => infer R
     ? (...args: A) => Promise<Awaited<R>> : never;
-};
+} & Disposable;
 
-// Defined by the Workshop's iframe bootstrap before this module runs.
-declare const gadget: Remote<ApprovalSessionApi>;
+type Session = Remote<ApprovalSessionApi>;
+
+// Defined by the Workshop's iframe bootstrap before this module runs. `connectViewer` is reachable
+// only when the Workshop doesn't introduce viewers; otherwise the Workshop refuses it.
+declare const gadget: Session & { connectViewer(viewer: Viewer): Session };
 declare const RpcTarget: { new(): object };
+
+/** Set once this browser has declared who it is, on a Workshop that doesn't introduce viewers. */
+let claimed: Viewer | undefined;
+let session: Session = gadget;
 
 const style = document.createElement("style");
 style.textContent = `
@@ -39,6 +50,10 @@ button.primary { background: #1d1d1b; color: #fff; border-color: #1d1d1b; }
 .error { background: #fbe3e1; color: #9b2c22; border-radius: 8px; padding: 8px 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #c9c9c4; display: inline-block; }
 .dot.online { background: #2f9e55; }
+.stack { display: grid; gap: 20px; }
+[hidden] { display: none !important; }
+.warning { background: #fff3d6; color: #7a5a00; border-radius: 8px; padding: 8px 12px; }
+a.switch { color: inherit; font-size: 12px; cursor: pointer; }
 ol.history { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
 @media print {
   body { background: #fff; }
@@ -75,7 +90,7 @@ let titleInput = el("input", { type: "text", placeholder: "What do you need appr
 let detailInput = el("textarea", { placeholder: "Details (optional)" });
 let submitButton = el("button", { className: "primary", textContent: "Submit request" });
 submitButton.onclick = () => attempt(async () => {
-  await gadget.submit(titleInput.value, detailInput.value);
+  await session.submit(titleInput.value, detailInput.value);
   titleInput.value = "";
   detailInput.value = "";
 });
@@ -88,8 +103,10 @@ let compose = el("section", { className: "compose" },
 let requestsSection = el("section");
 let peopleSection = el("section");
 let historySection = el("section");
-document.body.append(el("main", {}, header, errorBox, compose, requestsSection, peopleSection,
-    historySection));
+let app = el("div", { className: "stack", hidden: true },
+    compose, requestsSection, peopleSection, historySection);
+let picker = el("section", { hidden: true });
+document.body.append(el("main", {}, header, errorBox, picker, app));
 
 function renderRequests(view: View) {
   let items = view.requests.map(request => {
@@ -111,7 +128,7 @@ function renderRequests(view: View) {
         value: notes.get(request.id) ?? "" });
       note.oninput = () => notes.set(request.id, note.value);
       let decide = (outcome: Outcome) => attempt(async () => {
-        await gadget.decide(request.id, outcome, note.value);
+        await session.decide(request.id, outcome, note.value);
         notes.delete(request.id);
       });
       let approve = el("button", { className: "primary", textContent: "Approve" });
@@ -136,7 +153,7 @@ function renderPeople(view: View) {
         el("span", { className: "pill", textContent: member.role }));
     if (view.canManageApprovers && member.role !== "build") {
       let toggle = el("input", { type: "checkbox", checked: member.approver });
-      toggle.onchange = () => attempt(() => gadget.setApprover(member.id, toggle.checked));
+      toggle.onchange = () => attempt(() => session.setApprover(member.id, toggle.checked));
       row.append(el("label", { className: "row muted" }, toggle, "approver"));
     } else if (member.approver) {
       row.append(el("span", { className: "muted", textContent: "approver" }));
@@ -159,27 +176,85 @@ function renderHistory(view: View) {
 }
 
 function render(view: View) {
-  header.replaceChildren(el("h1", { textContent: "Approvals" }),
-      el("span", { className: "me" }, "Signed in as ", el("strong", { textContent: view.me.displayName }),
-          " ", el("span", { className: "pill", textContent: view.me.role }),
-          view.me.approver ? " · approver" : ""));
+  let me = el("span", { className: "me" },
+      claimed ? "Claiming to be " : "Signed in as ", el("strong", { textContent: view.me.displayName }),
+      " ", el("span", { className: "pill", textContent: view.me.role }),
+      view.me.approver ? " · approver" : "");
+  if (claimed) {
+    let change = el("a", { className: "switch", textContent: "Switch person" });
+    change.onclick = () => showPicker();
+    me.append(" · ", change);
+  }
+  header.replaceChildren(el("h1", { textContent: "Approvals" }), me);
   renderRequests(view);
   renderPeople(view);
   renderHistory(view);
+  picker.hidden = true;
+  app.hidden = false;
 }
 
+// Only the Workshop can introduce viewers, so without that the "who are you?" answer is whatever the
+// person types, and nothing stops them from typing someone else's name or role.
+function showPicker() {
+  listener = undefined;  // stop rendering as the previous person
+  let name = el("input", { type: "text", placeholder: "Your name", value: claimed?.displayName ?? "" });
+  let role = el("select", {},
+      el("option", { value: "use", textContent: "use" }),
+      el("option", { value: "build", textContent: "build" }));
+  role.value = claimed?.role ?? "use";
+  let go = el("button", { className: "primary", textContent: "Continue" });
+  go.onclick = () => attempt(async () => {
+    let displayName = name.value.trim();
+    if (!displayName) throw new Error("Enter a name.");
+    claimed = { id: `claimed:${displayName.toLowerCase()}`, displayName,
+      role: role.value === "build" ? "build" : "use" };
+    await subscribe();
+  });
+  picker.replaceChildren(el("h2", { textContent: "Who are you?" }),
+      el("div", { className: "warning", textContent: "This Workshop doesn't tell gadgets who you " +
+          "are, so this app has to take your word for it. Anyone can claim any name or role." }),
+      el("div", { className: "row" }, name, role, go));
+  header.replaceChildren(el("h1", { textContent: "Approvals" }));
+  app.hidden = true;
+  picker.hidden = false;
+  name.focus();
+}
+
+let listener: Listener | undefined;
+
 class Listener extends RpcTarget implements ViewListener {
-  update(view: View) { render(view); }
-  // The connection was lost; the `gadget` stub reconnects, so subscribe again through it.
-  [Symbol.dispose]() { void subscribe(); }
+  update(view: View) { if (this === listener) render(view); }
+  // The connection was lost; the `gadget` stub reconnects, so subscribe again through it. A
+  // listener replaced by "Switch person" is released on purpose and must not resubscribe.
+  [Symbol.dispose]() { if (this === listener) void subscribe(); }
 }
 
 async function subscribe() {
+  listener = new Listener();
+  if (claimed) {
+    // A reconnect or a new claim: sessions don't survive either, so open a fresh one.
+    let previous = session;
+    session = gadget.connectViewer(claimed);
+    if (previous !== gadget) previous[Symbol.dispose]();
+  }
   try {
-    render(await gadget.subscribe(new Listener()));
+    render(await session.subscribe(listener));
   } catch (error) {
     showError(error);
   }
 }
 
-await subscribe();
+// A Workshop that introduces viewers hands us a session, which knows who we are; otherwise `gadget`
+// is the Gadget, which has no whoami().
+async function start() {
+  try {
+    await gadget.whoami();
+  } catch (error) {
+    if (!String(error).includes('does not implement the method "whoami"')) throw error;
+    showPicker();
+    return;
+  }
+  await subscribe();
+}
+
+await start().catch(showError);

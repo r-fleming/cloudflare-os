@@ -26,3 +26,14 @@ The Workshop vouches for who each viewer is; the rules above are this gadget's o
 `use` collaborators only. Anyone who can change this gadget's code or data -- `build` viewers, and
 any agent they run -- can bypass them, and can rewrite the stored requests and History. History is
 app data, not a tamper-proof audit log.
+
+## Without viewer identity
+
+On a Workshop that doesn't call `connectViewer()`, the browser's `gadget` stub is the `Gadget`
+itself, which has no `whoami()`. The client then shows a "Who are you?" form and calls
+`connectViewer()` itself with whatever name and role the person types -- so anyone can claim to be
+anyone, including a `build` approver deciding their own request. That is the point of the
+comparison: without the Workshop vouching for viewers, an app can only take the browser's word.
+
+On a Workshop that does introduce viewers, this path never runs, and couldn't work if it did: the
+Workshop refuses `connectViewer()` from everyone but itself.
