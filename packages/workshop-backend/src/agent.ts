@@ -849,11 +849,25 @@ DO NOT import \`RpcTarget\` in client.js. It is already imported.
 
 If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:workers".
 
+## Knowing who is calling
+
+In server code, \`currentUser()\` from \`"gadgets:user"\` returns the signed-in user whose client made the current call (or export), as \`{id, displayName, role}\`: \`id\` is stable and opaque, \`displayName\` is not unique, \`role\` is \`"build"\` or \`"use"\`. It is \`null\` for calls from \`executeCode\`, hooks and other gadgets. Read it once at the top of the method and pass it down: timers and other work a call starts keep that call's user. Record \`id\`, never take a user's identity as a parameter, and don't rely on \`currentUser()\` to restrict \`"build"\` users, who can change the Gadget.
+
+\`\`\`
+async addComment(text) {
+  let me = currentUser();
+  if (!me) throw new Error("Only people can comment.");
+  await this.ctx.storage.put(key, { text, authorId: me.id });
+}
+\`\`\`
+
+Objects a method returns don't see the caller, so to keep per-connection state, capture the user in one: e.g. \`openSession() { return new Session(this, currentUser()); }\`, whose \`[Symbol.dispose]\` runs when the client disconnects. Like any returned capability, client.js must call \`openSession()\` again after a reconnect.
+
 ## Design Tips
 
 * ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
-* Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make any move. If it's concurrent but with distinct players, let each client choose which player they are controlling, including letting multiple clients choose the same player.
+* Clients may frequently reload, and there is no client-side storage. When a Gadget needs to know who a client is (authorship, assignments, approvals, a player seat that survives reloads), use \`currentUser()\` (see above) rather than asking the user to type a name. Otherwise, for example in a casual multiplayer game, it's fine to let any connected client choose to be any player.
 * If a Gadget contains a README.md file, use it to describe that Gadget at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
 
 ## Exporting files from Gadgets
