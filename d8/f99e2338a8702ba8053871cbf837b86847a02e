@@ -1,0 +1,19 @@
+packages/workshop-backend/src/agent.ts
+  s_c630575fa29d65::t_9f8ec0bd8c43a5 854,858,865-866,870
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d8f99e2338a8702ba8053871cbf837b86847a02e",
+  "prompts": {},
+  "sessions": {
+    "s_c630575fa29d65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f264500beffeSTbDtmYgswQVRn",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
