@@ -1,0 +1,21 @@
+packages/workshop-backend/src/gadget-viewer.ts
+  s_c630575fa29d65::t_8f171d56cc6561 46-111
+packages/workshop-backend/src/overseer.ts
+  s_c630575fa29d65::t_73dc59575670b4 71,73-75,5035,5048-5054,5061,5063,5183-5190,5192-5193,5199,5214,5217
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2b8cf1cd3a4247661722ecf321f7a5d4c0714e65",
+  "prompts": {},
+  "sessions": {
+    "s_c630575fa29d65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f264500beffeSTbDtmYgswQVRn",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
