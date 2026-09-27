@@ -71,6 +71,14 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+// Display names are chosen by each user and needn't be unique, so show part of the id beside them:
+// two people can both be called "alice", but not with the same id. A self-declared id (on a
+// Workshop that doesn't introduce viewers) can't tell anyone apart, so it's marked as such.
+function who(person: { id: string; name: string }): string {
+  let tag = person.id.startsWith("claimed:") ? "unverified" : `#${person.id.slice(0, 6)}`;
+  return `${person.name} (${tag})`;
+}
+
 function when(iso: string): string {
   return new Date(iso).toLocaleString();
 }
@@ -116,12 +124,12 @@ function renderRequests(view: View) {
             el("strong", { textContent: request.title }),
             el("span", { className: `pill ${status}`, textContent: status })),
         el("div", { className: "muted",
-          textContent: `Requested by ${request.requester.name} · ${when(request.createdAt)}` }));
+          textContent: `Requested by ${who(request.requester)} · ${when(request.createdAt)}` }));
     if (request.detail) item.append(el("div", { textContent: request.detail }));
     if (request.decision) {
       let { by, at, note } = request.decision;
       item.append(el("div", { className: "muted",
-        textContent: `${status === "approved" ? "Approved" : "Rejected"} by ${by.name} · ${when(at)}` +
+        textContent: `${status === "approved" ? "Approved" : "Rejected"} by ${who(by)} · ${when(at)}` +
             (note ? ` — “${note}”` : "") }));
     } else if (request.canDecide) {
       let note = el("input", { type: "text", placeholder: "Note (optional)",
@@ -149,7 +157,7 @@ function renderPeople(view: View) {
   let rows = view.members.map(member => {
     let row = el("div", { className: "row" },
         el("span", { className: member.online ? "dot online" : "dot" }),
-        el("span", { textContent: member.name }),
+        el("span", { textContent: who(member) }),
         el("span", { className: "pill", textContent: member.role }));
     if (view.canManageApprovers && member.role !== "build") {
       let toggle = el("input", { type: "checkbox", checked: member.approver });
@@ -165,9 +173,9 @@ function renderPeople(view: View) {
 
 function renderHistory(view: View) {
   let events = view.requests.flatMap(request => [
-    { at: request.createdAt, text: `${request.requester.name} requested “${request.title}”` },
+    { at: request.createdAt, text: `${who(request.requester)} requested “${request.title}”` },
     ...(request.decision ? [{ at: request.decision.at,
-      text: `${request.decision.by.name} ${request.decision.outcome} “${request.title}”` }] : []),
+      text: `${who(request.decision.by)} ${request.decision.outcome} “${request.title}”` }] : []),
   ]).sort((a, b) => a.at.localeCompare(b.at));
   historySection.replaceChildren(el("h2", { textContent: "History" }),
       el("ol", { className: "history" },
@@ -177,7 +185,7 @@ function renderHistory(view: View) {
 
 function render(view: View) {
   let me = el("span", { className: "me" },
-      claimed ? "Claiming to be " : "Signed in as ", el("strong", { textContent: view.me.displayName }),
+      claimed ? "Claiming to be " : "Signed in as ", el("strong", { textContent: who({ id: view.me.id, name: view.me.displayName }) }),
       " ", el("span", { className: "pill", textContent: view.me.role }),
       view.me.approver ? " · approver" : "");
   if (claimed) {

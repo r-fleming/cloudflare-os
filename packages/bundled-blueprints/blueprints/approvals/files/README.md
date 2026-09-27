@@ -5,14 +5,19 @@ History section shows who did what.
 
 ## Identity
 
-The gadget never asks who you are. The Workshop calls `Gadget.connectViewer(viewer)` once per
-connection with the signed-in person (`{id, displayName, role}`), and the browser's `gadget` stub is
-the `ApprovalSession` returned for that viewer. Keep it that way when editing:
+The gadget never asks who you are. Before a connection's first call, the Workshop calls
+`Gadget.connectViewer(viewer)` with the signed-in person (`{id, displayName, role}`), and the
+browser's calls then go to the `ApprovalSession` returned for that viewer. (Most gadgets would just
+call `viewer()` from `gadgets:viewer` in each method; this one opens its own session so that it also
+runs on a Workshop without viewer identity -- see below.) Keep it that way when editing:
 
 - Never add a method (on `Gadget` or `ApprovalSession`) that takes a user or viewer id as a
   parameter. Session actions are bound to their viewer in `connectViewer()`.
 - Public `Gadget` methods are reachable by the agent and other gadgets, which are not viewers, so
   they must not act as anyone (`listRequests()` only reads).
+
+Display names are chosen by each user and needn't be unique, so the UI shows the start of each
+person's viewer id beside their name ("alice (#3f9a1c)"). Compare ids, never names.
 
 ## Rules
 
