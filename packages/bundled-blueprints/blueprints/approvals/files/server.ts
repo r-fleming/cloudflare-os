@@ -13,9 +13,9 @@ import type {
 /**
  * Approvals: people submit requests, and an approver other than the requester decides them.
  *
- * Identity comes from the Workshop, never from the browser. The Workshop calls `connectViewer()`
- * once per connection with the signed-in person, and the client talks to the `ApprovalSession` it
- * returns. Everything a session does is bound to that viewer when the session is created, so no
+ * Identity comes from the Workshop, never from the browser. Before a connection's first call, the
+ * Workshop calls `connectViewer()` with the signed-in person, and the client talks to the
+ * `ApprovalSession` it returns. Everything a session does is bound to that viewer when the session is created, so no
  * method -- here or on the session -- accepts an identity as a parameter. Only the Workshop can
  * call `connectViewer()`: the agent, other gadgets and browsers all reach this class through stubs
  * that refuse it.
