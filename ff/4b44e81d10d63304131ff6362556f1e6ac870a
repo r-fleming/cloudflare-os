@@ -1,0 +1,21 @@
+packages/bundled-blueprints/blueprints/approvals/files/README.md
+  s_c630575fa29d65::t_de7be430069d6e 8-12
+packages/bundled-blueprints/blueprints/approvals/files/server.ts
+  s_c630575fa29d65::t_47e3b226d1f243 16-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ff4b44e81d10d63304131ff6362556f1e6ac870a",
+  "prompts": {},
+  "sessions": {
+    "s_c630575fa29d65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f264500beffeSTbDtmYgswQVRn",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
