@@ -204,7 +204,8 @@ export async function readSourceFiles(
  * `external` is what that runtime supplies, and it is little: the iframe supplies nothing, and the
  * Durable Object gets `cloudflare:workers`, the one `cloudflare:` module the gadget's worker loader
  * gives it (`loadGadgetWorker` in the backend's overseer.ts: no outbound network, so
- * `cloudflare:sockets` is moot, and none of the flags behind the others). Everything else a
+ * `cloudflare:sockets` is moot, and none of the flags behind the others), and `gadgets:user`, which
+ * that loader adds (`gadget-user.ts`). Everything else a
  * blueprint imports has to be a file it owns or a gadget library (see {@link auditInputs}), so a
  * bare `import "yjs"` fails this build rather than going missing inside the sandbox -- and so does
  * `cloudflare:test`, which a `BUNDLED_BLUEPRINTS_DIR` tree no tsc program checks could otherwise
@@ -212,7 +213,7 @@ export async function readSourceFiles(
  */
 const ENTRY_POINTS = [
   { name: "client", platform: "browser", external: [] },
-  { name: "server", platform: "neutral", external: ["cloudflare:workers"] },
+  { name: "server", platform: "neutral", external: ["cloudflare:workers", "gadgets:user"] },
 ] as const;
 
 type EntryPoint = (typeof ENTRY_POINTS)[number];
