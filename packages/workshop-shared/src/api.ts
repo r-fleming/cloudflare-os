@@ -4356,6 +4356,9 @@ export interface GadgetClient extends WorkpieceClient {
   // this stub into the gadget's iframe sandbox, so that the gadget UI can communicate with its
   // server side. It can also permit the coding agent to make direct calls.
   //
+  // Calls through the stub carry the *viewer* -- the calling user, as the Workshop authenticated
+  // them -- which gadget code reads with `viewer()` (see workshop-backend's gadget-viewer.ts).
+  //
   // If `chatId` is specified, then the gadget will include changes currently proposed in the given
   // chat.
   //
