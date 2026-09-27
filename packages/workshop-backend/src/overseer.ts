@@ -68,11 +68,14 @@ import {
   readCustomExportFormats,
 } from "./gadget-export";
 import {
+  GADGET_MAIN_MODULE,
+  GADGET_MAIN_MODULE_SOURCE,
   GADGET_VIEWER_METHOD,
+  GADGET_VIEWER_MODULE,
+  GADGET_VIEWER_MODULE_SOURCE,
   type GadgetViewer,
   gadgetViewerId,
   type GadgetWithViewers,
-  isViewerMethodMissing,
 } from "./gadget-viewer";
 
 const logger = createWorkshopLogger("workshop.overseer");
@@ -5029,7 +5032,7 @@ class OverseerImpl implements AgentHooks {
             : new Map();
       }
 
-      let modules: Record<string, string> = {};
+      let modules: Record<string, string | {js: string}> = {};
       for (let [file, content] of files) {
         if (file.endsWith(".js")) {
           modules[file] = content;
@@ -5042,14 +5045,25 @@ class OverseerImpl implements AgentHooks {
         overseerId: this.ctx.id.toString(),
       };
 
+      // Wrap the gadget's class so connectToGadget() can open per-viewer sessions on it (see
+      // gadget-viewer.ts). These module names can't collide with the gadget's own, which end in .js.
+      let mainModule = "server.js";
+      if (modules[mainModule] !== undefined) {
+        modules[GADGET_VIEWER_MODULE] = {js: GADGET_VIEWER_MODULE_SOURCE};
+        modules[GADGET_MAIN_MODULE] = {js: GADGET_MAIN_MODULE_SOURCE};
+        mainModule = GADGET_MAIN_MODULE;
+      }
+
       return {
         // TODO: compatibility date configuration
         compatibilityDate: "2026-02-01",
         compatibilityFlags: [
           // Make ctx.restore() available.
           "allow_irrevocable_stub_storage",
+          // For viewer() (see gadget-viewer.ts).
+          "nodejs_als",
         ],
-        mainModule: "server.js",
+        mainModule,
         modules,
         env: this.getEnvForLoader(gadgetId, {from: "gadget", chatId, gadgetId}, chatId),
         globalOutbound: null,
@@ -5160,37 +5174,32 @@ class OverseerImpl implements AgentHooks {
   // mints; omitted for the owner's and for internal callers (binding loopbacks already live
   // inside a counted session).
   //
-  // `viewer` is passed only by connectToGadget(). If the gadget implements GADGET_VIEWER_METHOD,
-  // the stub wraps what that returns instead of the facet. Every stub returned here refuses that
-  // method, so connectToGadget() is the only caller.
+  // `viewer` is passed only by connectToGadget(): the stub then calls through the session that
+  // GADGET_VIEWER_METHOD opens for that viewer, opened on the first call so that a gadget nobody
+  // calls (e.g. one with no server.js) is never loaded. Every stub returned here refuses that
+  // method, so connectToGadget() is its only caller.
   //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
   async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
       viewer?: GadgetViewer): Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher<GadgetWithViewers>(gadgetId, chatId);
-    let connection: object = facet;
-    if (viewer) {
-      try {
-        connection = await facet.connectViewer(viewer);
-      } catch (err) {
-        if (!isViewerMethodMissing(err)) {
-          this.deliverGadgetLogs(chatId ?? null, [{
-            timestamp: new Date(),
-            level: "error",
-            message: [`${err}\n    at ${GADGET_VIEWER_METHOD}()`],
-          }]);
-          throw err;
-        }
+    let session: any;
+    let callee = (): object => {
+      if (!viewer) return facet;
+      if (!session) {
+        session = facet.connectViewer(viewer);
+        session.catch(() => {});  // its failure reaches the caller through the call that opened it
       }
-    }
+      return session;
+    };
     let leaveSession = joinAs ? this.joinSession(joinAs) : undefined;
 
     let self = this;
 
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
-    let proxy = new Proxy(connection, {
-      get(target, prop, receiver) {
+    let proxy = new Proxy(facet, {
+      get(_facet, prop, receiver) {
         if (prop === GADGET_VIEWER_METHOD) {
           return () => {
             throw new Error(`${GADGET_VIEWER_METHOD}() can only be called by the Workshop.`);
@@ -5199,15 +5208,19 @@ class OverseerImpl implements AgentHooks {
 
         // The lease ends when the client disposes the stub. (The DO reset that severs sessions
         // releases it implicitly, by discarding this object -- and joinSession's leave is
-        // idempotent, so a double dispose is harmless.) Disposal always reaches the target, since
-        // a viewer session's disposer is how its gadget learns the viewer left.
+        // idempotent, so a double dispose is harmless.) Disposal also reaches a viewer session,
+        // which is how a gadget with its own GADGET_VIEWER_METHOD learns the viewer left.
         if (prop === Symbol.dispose) {
-          let inner = Reflect.get(target, prop, target);
+          let disposeFacet = Reflect.get(facet, prop, facet);
           return () => {
             leaveSession?.();
-            if (typeof inner === "function") Reflect.apply(inner, target, []);
+            session?.[Symbol.dispose]();
+            if (typeof disposeFacet === "function") Reflect.apply(disposeFacet, facet, []);
           };
         }
+
+        // Symbols and "then" (probed on anything awaited) are never calls; don't open a session.
+        let target = typeof prop === "symbol" || prop === "then" ? facet : callee();
 
         // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
         //   we'll get an illegal invocation, as `receiver` points to our Proxy.
@@ -12407,8 +12420,19 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new UseGadgetClientInterface(this.impl, id, this.clientUserId, async () =>
-        this.impl.gadgetViewer(this.clientProfileId, "use",
-            (await retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger)).name));
+        this.impl.gadgetViewer(this.clientProfileId, "use", (await this.#getClientProfile()).name));
+  }
+
+  #clientProfilePromise?: Promise<AiChatAuthorInfo>;
+
+  // Cached like OverseerClientInterface's; retried after a failure.
+  #getClientProfile(): Promise<AiChatAuthorInfo> {
+    this.#clientProfilePromise ??= retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger)
+        .catch((err: unknown) => {
+          this.#clientProfilePromise = undefined;
+          throw err;
+        });
+    return this.#clientProfilePromise;
   }
 
   // --- Denied methods (build-only) ---
