@@ -75,7 +75,6 @@ import {
   GADGET_VIEWER_MODULE_SOURCE,
   type GadgetViewer,
   gadgetViewerId,
-  type GadgetWithViewers,
 } from "./gadget-viewer";
 
 const logger = createWorkshopLogger("workshop.overseer");
@@ -1178,7 +1177,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // collaborators (enforced by SharingManager).
       ownerInvitesOnly: singleton(false),
 
-      // Secret key (hex) for GadgetViewer ids, generated on first use by gadgetViewer().
+      // Secret key (hex) for GadgetViewer ids, generated on first use.
       viewerIdKey: <string | undefined>undefined,
     },
 
@@ -5045,8 +5044,7 @@ class OverseerImpl implements AgentHooks {
         overseerId: this.ctx.id.toString(),
       };
 
-      // Wrap the gadget's class so connectToGadget() can open per-viewer sessions on it (see
-      // gadget-viewer.ts). These module names can't collide with the gadget's own, which end in .js.
+      // Wrap the gadget's class to add GADGET_VIEWER_METHOD. Gadget module names all end in .js.
       let mainModule = "server.js";
       if (modules[mainModule] !== undefined) {
         modules[GADGET_VIEWER_MODULE] = {js: GADGET_VIEWER_MODULE_SOURCE};
@@ -5060,7 +5058,7 @@ class OverseerImpl implements AgentHooks {
         compatibilityFlags: [
           // Make ctx.restore() available.
           "allow_irrevocable_stub_storage",
-          // For viewer() (see gadget-viewer.ts).
+          // For viewer().
           "nodejs_als",
         ],
         mainModule,
@@ -5086,8 +5084,8 @@ class OverseerImpl implements AgentHooks {
   // `this.ctx.restore()` -- to hand a persistent callback to a spawned agent or a hook -- would
   // throw. Every stub to a gadget facet therefore comes from here; only [restore]() itself, which
   // is what ctx.restore() invokes, touches the raw facet (see #getGadgetFacetRaw).
-  async getGadgetFacetFetcher<T extends DurableObject = DurableObject>(
-      gadgetId: WorkpieceId, chatId?: number): Promise<Fetcher<T>> {
+  async getGadgetFacetFetcher(gadgetId: WorkpieceId, chatId?: number)
+      : Promise<Fetcher<DurableObject>> {
     let params: OverseerRestoreParams = {type: "gadget", gadgetId};
     chatId = this.#resolveGadgetChatId(gadgetId, chatId);
     if (chatId !== undefined) params.chatId = chatId;
@@ -5174,32 +5172,21 @@ class OverseerImpl implements AgentHooks {
   // mints; omitted for the owner's and for internal callers (binding loopbacks already live
   // inside a counted session).
   //
-  // `viewer` is passed only by connectToGadget(): the stub then calls through the session that
-  // GADGET_VIEWER_METHOD opens for that viewer, opened on the first call so that a gadget nobody
-  // calls (e.g. one with no server.js) is never loaded. Every stub returned here refuses that
-  // method, so connectToGadget() is its only caller.
+  // `viewer` is passed only by connectToGadget(): the stub then makes each call through
+  // GADGET_VIEWER_METHOD, which every stub returned here refuses.
   //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
   async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
       viewer?: GadgetViewer): Promise<RpcStub<any>> {
-    let facet = await this.getGadgetFacetFetcher<GadgetWithViewers>(gadgetId, chatId);
-    let session: any;
-    let callee = (): object => {
-      if (!viewer) return facet;
-      if (!session) {
-        session = facet.connectViewer(viewer);
-        session.catch(() => {});  // its failure reaches the caller through the call that opened it
-      }
-      return session;
-    };
+    let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
     let leaveSession = joinAs ? this.joinSession(joinAs) : undefined;
 
     let self = this;
 
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
     let proxy = new Proxy(facet, {
-      get(_facet, prop, receiver) {
+      get(target, prop, receiver) {
         if (prop === GADGET_VIEWER_METHOD) {
           return () => {
             throw new Error(`${GADGET_VIEWER_METHOD}() can only be called by the Workshop.`);
@@ -5208,19 +5195,14 @@ class OverseerImpl implements AgentHooks {
 
         // The lease ends when the client disposes the stub. (The DO reset that severs sessions
         // releases it implicitly, by discarding this object -- and joinSession's leave is
-        // idempotent, so a double dispose is harmless.) Disposal also reaches a viewer session,
-        // which is how a gadget with its own GADGET_VIEWER_METHOD learns the viewer left.
-        if (prop === Symbol.dispose) {
-          let disposeFacet = Reflect.get(facet, prop, facet);
+        // idempotent, so a double dispose is harmless.)
+        if (prop === Symbol.dispose && leaveSession) {
+          let inner = Reflect.get(target, prop, target);
           return () => {
-            leaveSession?.();
-            session?.[Symbol.dispose]();
-            if (typeof disposeFacet === "function") Reflect.apply(disposeFacet, facet, []);
+            leaveSession!();
+            if (typeof inner === "function") Reflect.apply(inner, target, []);
           };
         }
-
-        // Symbols and "then" (probed on anything awaited) are never calls; don't open a session.
-        let target = typeof prop === "symbol" || prop === "then" ? facet : callee();
 
         // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
         //   we'll get an illegal invocation, as `receiver` points to our Proxy.
@@ -5231,6 +5213,11 @@ class OverseerImpl implements AgentHooks {
         // named "then". Also if the prop is a symbol then it's definitely not an RPC so we handle
         // that here.
         if (typeof method !== "function" || typeof prop === "symbol") return method;
+
+        if (viewer) {
+          let callAsViewer = Reflect.get(target, GADGET_VIEWER_METHOD, target);
+          method = (...args: any[]) => Reflect.apply(callAsViewer, target, [viewer, prop, args]);
+        }
 
         // HACK: We're going to assume all top-level properties are methods, and we are going to
         //   intercept exceptions thrown by these methods and deliver them to the console log
@@ -12420,19 +12407,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new UseGadgetClientInterface(this.impl, id, this.clientUserId, async () =>
-        this.impl.gadgetViewer(this.clientProfileId, "use", (await this.#getClientProfile()).name));
-  }
-
-  #clientProfilePromise?: Promise<AiChatAuthorInfo>;
-
-  // Cached like OverseerClientInterface's; retried after a failure.
-  #getClientProfile(): Promise<AiChatAuthorInfo> {
-    this.#clientProfilePromise ??= retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger)
-        .catch((err: unknown) => {
-          this.#clientProfilePromise = undefined;
-          throw err;
-        });
-    return this.#clientProfilePromise;
+        this.impl.gadgetViewer(this.clientProfileId, "use",
+            (await retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger)).name));
   }
 
   // --- Denied methods (build-only) ---

@@ -851,17 +851,13 @@ If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:worke
 
 ## Knowing who is calling
 
-In server code, \`import { viewer } from "gadgets:viewer"\`. During a \`Gadget\` method called by a client, \`viewer()\` returns the signed-in user whose connection made the call: \`{id, displayName, role}\`. \`id\` is opaque and stable for that user in this workspace; \`displayName\` is not unique; \`role\` is \`"build"\` (can edit the Gadget, including the owner) or \`"use"\`. It returns \`null\` for calls from \`executeCode\`, hooks and other gadgets, and inside methods of objects a \`Gadget\` method returned.
+In server code, \`viewer()\` from \`"gadgets:viewer"\` returns the signed-in user whose client made the current call, as \`{id, displayName, role}\` (\`id\` is stable and opaque; \`displayName\` is not unique; \`role\` is \`"build"\` or \`"use"\`). It is \`null\` for calls from \`executeCode\`, hooks and other gadgets, and inside objects a method returned: to keep the viewer, capture it when creating the object (e.g. an \`openSession()\` method returning an \`RpcTarget\`, whose \`[Symbol.dispose]\` runs when the client disconnects). Never take a user's identity as a parameter. Rules bind \`"use"\` viewers only: \`"build"\` viewers and their agents can change the Gadget.
 
 \`\`\`
-async addComment(text) {
-  let me = viewer();
-  if (!me) throw new Error("Only people can comment.");
-  await this.ctx.storage.put(\`comment:\${Date.now()}\`, { text, authorId: me.id, author: me.displayName });
-}
+let me = viewer();  // in a Gadget method
+if (!me) throw new Error("Only people can comment.");
+await this.ctx.storage.put(key, { text, authorId: me.id, author: me.displayName });
 \`\`\`
-
-Record \`id\`, not names, and never take a user's identity as a method parameter. A Gadget's rules bind \`"use"\` viewers only, since \`"build"\` viewers and their agents can change its code and data. For per-connection state or to learn when a connection closes, a \`Gadget\` may define \`connectViewer(viewer)\` returning an \`RpcTarget\`: the client then talks to that object instead, and its \`[Symbol.dispose]\` runs when the connection closes.
 
 ## Design Tips
 

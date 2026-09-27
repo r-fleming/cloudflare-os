@@ -1,11 +1,6 @@
 import type { CollaboratorRole } from "@gadgets/workshop-shared/api";
-import type { DurableObject, RpcTarget } from "cloudflare:workers";
 
-/**
- * The user behind one connectToGadget() connection, as authenticated by the Workshop. Gadget rules
- * bind "use" viewers only: "build" viewers (including the owner) can change the gadget's code and
- * data.
- */
+/** The user behind a connectToGadget() connection, as gadget code sees them through `viewer()`. */
 export type GadgetViewer = {
   /** Stable for this user within this workspace; unrelated to their username, email or other ids. */
   id: string;
@@ -13,20 +8,8 @@ export type GadgetViewer = {
   /** Chosen by the user; not unique. */
   displayName: string;
 
-  /** The access the connection was admitted with; the owner connects as "build". */
+  /** The owner connects as "build". */
   role: CollaboratorRole;
-};
-
-/**
- * Method through which connectToGadget() opens a connection's session on the gadget (see
- * GADGET_VIEWER_MODULE_SOURCE). Every gadget stub the Workshop hands out refuses it (see
- * OverseerImpl.getGadgetFacet), so only connectToGadget() can present a viewer.
- */
-export const GADGET_VIEWER_METHOD = "connectViewer";
-
-/** What the facet looks like once GADGET_MAIN_MODULE has wrapped it. */
-export type GadgetWithViewers = DurableObject & {
-  connectViewer(viewer: GadgetViewer): RpcTarget;
 };
 
 /** HMAC-SHA-256 of `profileId` under the workspace's key (both hex). */
@@ -38,67 +21,44 @@ export async function gadgetViewerId(workspaceKey: string, profileId: string): P
   return new Uint8Array(sig).toHex();
 }
 
+/**
+ * Method, added to every Gadget class, through which a connectToGadget() stub makes each call on
+ * behalf of its viewer. Every gadget stub the Workshop hands out refuses it.
+ */
+export const GADGET_VIEWER_METHOD = "callAsViewer";
+
 /** Module gadget code imports `viewer()` from. */
 export const GADGET_VIEWER_MODULE = "gadgets:viewer";
 
-/**
- * Source of GADGET_VIEWER_MODULE. `withViewers()` gives the gadget's class a GADGET_VIEWER_METHOD
- * whose session forwards each call to the gadget, with `viewer()` answering for its duration (and
- * for any timer or callback that call starts). A gadget that defines the method itself keeps it.
- */
+/** Source of GADGET_VIEWER_MODULE. */
 export const GADGET_VIEWER_MODULE_SOURCE = `
 import { AsyncLocalStorage } from "node:async_hooks";
-import { DurableObject, RpcTarget } from "cloudflare:workers";
 
 const current = new AsyncLocalStorage();
 
-/** Who made the current call: a connected user, or null (the agent, a hook, another gadget). */
+/** The user whose connection made the current call, or null (the agent, a hook, another gadget). */
 export function viewer() {
   return current.getStore() ?? null;
 }
 
-const sessionTargets = new WeakMap();
-const sessionClasses = new WeakMap();
-
-function sessionClassFor(cls) {
-  let Session = sessionClasses.get(cls);
-  if (Session) return Session;
-  Session = class extends RpcTarget {};
-  let seen = new Set(["constructor", "${GADGET_VIEWER_METHOD}"]);
-  for (let proto = cls.prototype; proto && proto !== DurableObject.prototype &&
-      proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
-    for (let [name, desc] of Object.entries(Object.getOwnPropertyDescriptors(proto))) {
-      if (seen.has(name)) continue;
-      seen.add(name);
-      let forward = (session, use) => {
-        let { gadget, viewer } = sessionTargets.get(session);
-        return current.run(viewer, () => use(gadget));
-      };
-      if (typeof desc.value === "function") {
-        Session.prototype[name] = function (...args) {
-          return forward(this, gadget => gadget[name](...args));
-        };
-      } else if (desc.get) {
-        Object.defineProperty(Session.prototype, name, {
-          get() { return forward(this, gadget => gadget[name]); },
-        });
-      }
-    }
+// Only what RPC could call directly: methods on the class, not fields or Object's own.
+function isMethod(object, name) {
+  for (let proto = Object.getPrototypeOf(object); proto && proto !== Object.prototype;
+      proto = Object.getPrototypeOf(proto)) {
+    let desc = Object.getOwnPropertyDescriptor(proto, name);
+    if (desc) return typeof desc.value === "function";
   }
-  sessionClasses.set(cls, Session);
-  return Session;
+  return false;
 }
 
 export function withViewers(Base) {
   if (typeof Base !== "function") return Base;
   return class Gadget extends Base {
-    ${GADGET_VIEWER_METHOD}(viewer) {
-      if (typeof super.${GADGET_VIEWER_METHOD} === "function") {
-        return current.run(viewer, () => super.${GADGET_VIEWER_METHOD}(viewer));
+    ${GADGET_VIEWER_METHOD}(viewer, name, args) {
+      if (name === "constructor" || name === "${GADGET_VIEWER_METHOD}" || !isMethod(this, name)) {
+        throw new TypeError(\`The RPC receiver does not implement the method "\${name}".\`);
       }
-      let session = new (sessionClassFor(Base))();
-      sessionTargets.set(session, { gadget: this, viewer });
-      return session;
+      return current.run(viewer, () => this[name](...args));
     }
   };
 }
