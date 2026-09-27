@@ -1,11 +1,11 @@
-// Gadget code learns who made a call through viewer(), and only connectToGadget() can say.
+// Gadget code learns who made a call through currentUser(), and only the Workshop can say.
 // Facet tests run real gadgets in a real OverseerDurableObject (see gadget-restore.test.ts).
 
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { OverseerDurableObject } from "../src/overseer.js";
-import type { GadgetViewer } from "../src/gadget-viewer.js";
+import type { GadgetUser } from "../src/gadget-user.js";
 import { openFakeOverseer } from "./fixtures.js";
 
 declare module "cloudflare:workers" {
@@ -15,29 +15,38 @@ declare module "cloudflare:workers" {
 }
 
 const SERVER_JS = `
-import { DurableObject, RpcTarget } from "cloudflare:workers";
-import { viewer } from "gadgets:viewer";
+import { DurableObject, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { currentUser } from "gadgets:user";
 class Counter extends RpcTarget { n = 0; inc() { return ++this.n; } }
 export class Gadget extends DurableObject {
-  helper = () => "not a method";
-  who() { return viewer(); }
+  bound = this.who.bind(this);
+  shadowed = this.shadowed.bind(this);
+  shadowed() { return "shadowed ran"; }
+  who() { return currentUser(); }
   async slowWho(ms) {
     await new Promise(resolve => setTimeout(resolve, ms));
-    return viewer()?.id ?? null;
+    return currentUser()?.id ?? null;
   }
   counter() { return new Counter(); }
   fails() { throw new Error("boom"); }
+  alarm() { return "alarm ran"; }
+}
+export class ExportHandler extends WorkerEntrypoint {
+  getExportFormats() {
+    return [{ id: "who", label: "Who", mode: "server", contentType: "text/plain", fileExtension: ".txt" }];
+  }
+  async export(gadget) { return new Response((await gadget.who())?.id ?? "nobody").body; }
 }
 `;
 
-const ALICE: GadgetViewer = { id: "v-alice", displayName: "Alice", role: "use" };
-const BOB: GadgetViewer = { id: "v-bob", displayName: "Bob", role: "use" };
+const ALICE: GadgetUser = { id: "u-alice", displayName: "Alice", role: "use" };
+const BOB: GadgetUser = { id: "u-bob", displayName: "Bob", role: "use" };
 
 let doCounter = 0;
 
 async function withGadget(files: Record<string, string>,
     fn: (impl: any, logged: string[]) => Promise<void>): Promise<void> {
-  await runInDurableObject(env.TEST_OVERSEER.getByName(`gadget-viewer-${++doCounter}`),
+  await runInDurableObject(env.TEST_OVERSEER.getByName(`gadget-user-${++doCounter}`),
       async (instance: OverseerDurableObject) => {
     let impl = (instance as unknown as { impl: any }).impl;
     let logged: string[] = [];
@@ -61,8 +70,8 @@ function rejection(call: Promise<unknown>): Promise<string | null> {
   return call.then(() => null, (error: unknown) => String(error));
 }
 
-describe("viewer()", () => {
-  it("is the viewer who made each call, and null for other callers",
+describe("currentUser()", () => {
+  it("is the user who made each call, and null for other callers",
       () => withGadget({ "server.js": SERVER_JS }, async (impl, logged) => {
     using alice = await impl.getGadgetFacet(1, undefined, undefined, ALICE);
     using bob = await impl.getGadgetFacet(1, undefined, undefined, BOB);
@@ -70,27 +79,40 @@ describe("viewer()", () => {
     expect(await alice.who()).toEqual(ALICE);
     expect(await facet.who()).toBe(null);
     expect(await Promise.all([alice.slowWho(30), bob.slowWho(5), facet.slowWho(15)]))
-        .toEqual(["v-alice", "v-bob", null]);
+        .toEqual(["u-alice", "u-bob", null]);
 
-    // Otherwise calls behave as they do on the facet.
+    // Otherwise calls behave as they do over plain RPC.
     using counter = await alice.counter();
     expect(await counter.inc()).toBe(1);
     expect(await rejection(alice.fails())).toContain("boom");
     expect(logged).toEqual([expect.stringMatching(/boom[\s\S]*at fails\(\)/)]);
-    expect(await rejection(alice.helper())).toContain('does not implement the method "helper"');
+    for (let name of ["alarm", "bound", "shadowed"]) {  // as plain RPC refuses them
+      expect(await rejection(alice[name]())).toContain(`does not implement the method "${name}"`);
+    }
+    expect(await rejection(facet.shadowed())).toContain('does not implement the method "shadowed"');
   }));
 
-  it("can only be set by connectToGadget()", () => withGadget({ "server.js": SERVER_JS },
+  it("is the exporting user during an export",
+      () => withGadget({ "server.js": SERVER_JS }, async impl => {
+    let stream = await impl.exportGadget(1, "who", undefined, ALICE);
+    expect(await new Response(stream).text()).toBe("u-alice");
+  }));
+
+  it("can only be set by the Workshop", () => withGadget({ "server.js": SERVER_JS },
       async impl => {
     using facet = await impl.getGadgetFacet(1);
     using alice = await impl.getGadgetFacet(1, undefined, undefined, ALICE);
     for (let stub of [facet, alice]) {
-      expect(await rejection(stub.callAsViewer(BOB, "who", [])))
+      expect(await rejection(stub.callAsUser("", BOB, "who", [])))
           .toContain("can only be called by the Workshop");
     }
+    // Nor without the workspace's secret, even past the stubs' refusal.
+    let raw = await impl.getGadgetFacetFetcher(1);
+    expect(await rejection(raw.callAsUser("guess", BOB, "who", [])))
+        .toContain("can only be called by the Workshop");
   }));
 
-  it("leaves gadgets with no or broken server code as they were", async () => {
+  it("leaves gadgets with no, broken or incomplete server code working as before", async () => {
     await withGadget({ "client.js": "0" }, async (impl, logged) => {
       using _alice = await impl.getGadgetFacet(1, undefined, undefined, ALICE);
       expect(logged).toEqual([]);
@@ -99,19 +121,25 @@ describe("viewer()", () => {
       using alice = await impl.getGadgetFacet(1, undefined, undefined, ALICE);
       expect(await rejection(alice.who())).toContain("Failed to start Worker");
     });
+    // No Gadget class: the rest of the worker (here, its exports) still loads.
+    await withGadget({ "server.js": SERVER_JS.replace("export class Gadget", "class Gadget") },
+        async impl => {
+      using alice = await impl.getGadgetFacet(1, undefined, undefined, ALICE);
+      expect(await rejection(alice.who())).toContain('must export a class named "Gadget"');
+      expect(await impl.getGadgetExportFormats(1)).toEqual([expect.objectContaining({ id: "who" })]);
+    });
   });
 });
 
-describe("viewer ids", () => {
-  it("are stable per user within a workspace, opaque, and differ across workspaces", async () => {
+describe("user ids", () => {
+  it("are stable per user within a workspace, and differ across workspaces", async () => {
     let ids: string[] = [];
     for (let i = 0; i < 2; i++) {
       await withGadget({}, async impl => {
-        let alice = await impl.gadgetViewer("alice@example.com", "use", "Alice");
+        let alice = await impl.gadgetUser("alice@example.com", "use", "Alice");
         expect(alice).toEqual({ id: alice.id, displayName: "Alice", role: "use" });
-        expect((await impl.gadgetViewer("alice@example.com", "build", "A")).id).toBe(alice.id);
-        expect((await impl.gadgetViewer("bob@example.com", "use", "Bob")).id).not.toBe(alice.id);
-        expect(alice.id).not.toContain("alice");
+        expect((await impl.gadgetUser("alice@example.com", "build", "A")).id).toBe(alice.id);
+        expect((await impl.gadgetUser("bob@example.com", "use", "Bob")).id).not.toBe(alice.id);
         ids.push(alice.id);
       });
     }
@@ -121,7 +149,7 @@ describe("viewer ids", () => {
 
 describe("connectToGadget() presents its session's user", () => {
   it.each([["owner", "build"], ["build", "build"], ["use", "use"]] as const)(
-      "as a(n) %s viewer", async (role, expected) => {
+      "as a(n) %s", async (role, expected) => {
     let presented: unknown[] = [];
     let client = await openFakeOverseer({}, {
       role: role === "use" ? "use" : "build",
@@ -130,9 +158,9 @@ describe("connectToGadget() presents its session's user", () => {
         ...(role === "build" ? { ownerId: "someone-else" } : {}),
         getGadgetRecord: () => ({ type: "gadget", id: 1 }),
         recordGadgetAnalytics: () => {},
-        gadgetViewer: async (profileId: string, viewerRole: string) => ({ profileId, viewerRole }),
-        getGadgetFacet: async (_id: number, _chat?: number, _join?: string, viewer?: unknown) => {
-          presented.push(viewer);
+        gadgetUser: async (profileId: string, userRole: string) => ({ profileId, userRole }),
+        getGadgetFacet: async (_id: number, _chat?: number, _join?: string, user?: unknown) => {
+          presented.push(user);
           return {};
         },
         users: {
@@ -147,6 +175,6 @@ describe("connectToGadget() presents its session's user", () => {
     });
     await (await client.getGadget(1) as any).connectToGadget();
     let profileId = role === "use" ? "viewer-id-profile" : "owner-id-profile";
-    expect(presented).toEqual([{ profileId, viewerRole: expected }]);
+    expect(presented).toEqual([{ profileId, userRole: expected }]);
   });
 });

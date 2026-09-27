@@ -69,13 +69,13 @@ import {
 } from "./gadget-export";
 import {
   GADGET_MAIN_MODULE,
-  GADGET_MAIN_MODULE_SOURCE,
-  GADGET_VIEWER_METHOD,
-  GADGET_VIEWER_MODULE,
-  GADGET_VIEWER_MODULE_SOURCE,
-  type GadgetViewer,
-  gadgetViewerId,
-} from "./gadget-viewer";
+  GADGET_USER_METHOD,
+  GADGET_USER_MODULE,
+  GADGET_USER_MODULE_SOURCE,
+  type GadgetUser,
+  gadgetMainModuleSource,
+  gadgetUserId,
+} from "./gadget-user";
 
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
@@ -1177,8 +1177,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // collaborators (enforced by SharingManager).
       ownerInvitesOnly: singleton(false),
 
-      // Secret key (hex) for GadgetViewer ids, generated on first use.
-      viewerIdKey: <string | undefined>undefined,
+      // Secret (hex) that GadgetUser ids and the GADGET_USER_METHOD secret derive from; see
+      // #userSecret().
+      userIdSecret: <string | undefined>undefined,
     },
 
     collections: {
@@ -5044,11 +5045,12 @@ class OverseerImpl implements AgentHooks {
         overseerId: this.ctx.id.toString(),
       };
 
-      // Wrap the gadget's class to add GADGET_VIEWER_METHOD. Gadget module names all end in .js.
+      // Wrap the gadget's class to add GADGET_USER_METHOD. Only .js files become modules above,
+      // so these names can't collide with the gadget's own files.
       let mainModule = "server.js";
       if (modules[mainModule] !== undefined) {
-        modules[GADGET_VIEWER_MODULE] = {js: GADGET_VIEWER_MODULE_SOURCE};
-        modules[GADGET_MAIN_MODULE] = {js: GADGET_MAIN_MODULE_SOURCE};
+        modules[GADGET_USER_MODULE] = {js: GADGET_USER_MODULE_SOURCE};
+        modules[GADGET_MAIN_MODULE] = {js: gadgetMainModuleSource(await this.#gadgetCallSecret())};
         mainModule = GADGET_MAIN_MODULE;
       }
 
@@ -5058,7 +5060,7 @@ class OverseerImpl implements AgentHooks {
         compatibilityFlags: [
           // Make ctx.restore() available.
           "allow_irrevocable_stub_storage",
-          // For viewer().
+          // For currentUser().
           "nodejs_als",
         ],
         mainModule,
@@ -5151,15 +5153,24 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  // The GadgetViewer that connectToGadget() presents on behalf of `profileId`.
-  async gadgetViewer(profileId: string, role: GadgetViewer["role"], displayName: string)
-      : Promise<GadgetViewer> {
-    let key = this.storage.viewerIdKey.get();
-    if (key === undefined) {
-      key = crypto.getRandomValues(new Uint8Array(32)).toHex();
-      this.storage.viewerIdKey.put(key);
+  #userSecret(): string {
+    let secret = this.storage.userIdSecret.get();
+    if (secret === undefined) {
+      secret = crypto.getRandomValues(new Uint8Array(32)).toHex();
+      this.storage.userIdSecret.put(secret);
     }
-    return {id: await gadgetViewerId(key, profileId), displayName, role};
+    return secret;
+  }
+
+  // Derived rather than userIdSecret itself, which gadget code must not learn.
+  #gadgetCallSecret(): Promise<string> {
+    return gadgetUserId(this.#userSecret(), GADGET_USER_METHOD);
+  }
+
+  // The GadgetUser that connectToGadget() presents on behalf of `profileId`.
+  async gadgetUser(profileId: string, role: GadgetUser["role"], displayName: string)
+      : Promise<GadgetUser> {
+    return {id: await gadgetUserId(this.#userSecret(), profileId), displayName, role};
   }
 
   // Get an RpcStub for the gadget facet, which can be returned to the client.
@@ -5172,14 +5183,15 @@ class OverseerImpl implements AgentHooks {
   // mints; omitted for the owner's and for internal callers (binding loopbacks already live
   // inside a counted session).
   //
-  // `viewer` is passed only by connectToGadget(): the stub then makes each call through
-  // GADGET_VIEWER_METHOD, which every stub returned here refuses.
+  // `user` is passed only by connectToGadget() and exports: the stub then makes each call through
+  // GADGET_USER_METHOD, which every stub returned here refuses.
   //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
   async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
-      viewer?: GadgetViewer): Promise<RpcStub<any>> {
+      user?: GadgetUser): Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
+    let callSecret = user && await this.#gadgetCallSecret();
     let leaveSession = joinAs ? this.joinSession(joinAs) : undefined;
 
     let self = this;
@@ -5187,9 +5199,9 @@ class OverseerImpl implements AgentHooks {
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
     let proxy = new Proxy(facet, {
       get(target, prop, receiver) {
-        if (prop === GADGET_VIEWER_METHOD) {
+        if (prop === GADGET_USER_METHOD) {
           return () => {
-            throw new Error(`${GADGET_VIEWER_METHOD}() can only be called by the Workshop.`);
+            throw new Error(`${GADGET_USER_METHOD}() can only be called by the Workshop.`);
           };
         }
 
@@ -5214,9 +5226,10 @@ class OverseerImpl implements AgentHooks {
         // that here.
         if (typeof method !== "function" || typeof prop === "symbol") return method;
 
-        if (viewer) {
-          let callAsViewer = Reflect.get(target, GADGET_VIEWER_METHOD, target);
-          method = (...args: any[]) => Reflect.apply(callAsViewer, target, [viewer, prop, args]);
+        if (user) {
+          let callAsUser = Reflect.get(target, GADGET_USER_METHOD, target);
+          method = (...args: any[]) =>
+            Reflect.apply(callAsUser, target, [callSecret, user, prop, args]);
         }
 
         // HACK: We're going to assume all top-level properties are methods, and we are going to
@@ -5292,10 +5305,11 @@ class OverseerImpl implements AgentHooks {
     return resolved.formats;
   }
 
-  async exportGadget(gadgetId: WorkpieceId, formatId: string, chatId?: number)
+  async exportGadget(gadgetId: WorkpieceId, formatId: string, chatId?: number, user?: GadgetUser)
       : Promise<ReadableStream<Uint8Array>> {
     this.checkChatExistsAndMaterializeChanges(chatId);
-    let {formats, handler, gadget} = await this.#resolveGadgetExportFormats(gadgetId, chatId);
+    let {formats, handler, gadget} =
+        await this.#resolveGadgetExportFormats(gadgetId, chatId, user);
     if (!gadget) throw new Error("The Gadget server stub is unavailable.");
     using exportGadget = gadget;
     let format = formats.find(candidate => candidate.id === formatId);
@@ -5322,7 +5336,8 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  async #resolveGadgetExportFormats(gadgetId: WorkpieceId, chatId?: number): Promise<{
+  async #resolveGadgetExportFormats(gadgetId: WorkpieceId, chatId?: number, user?: GadgetUser)
+      : Promise<{
     formats: GadgetExportFormat[];
     handler: Fetcher<GadgetExportEntrypoint> | null;
     gadget: NativeRpcStub<any> | null;
@@ -5334,7 +5349,8 @@ class OverseerImpl implements AgentHooks {
       .getEntrypoint<GadgetExportEntrypoint>(GADGET_EXPORT_ENTRYPOINT);
     // getGadgetFacet() wraps this native stub for Cap'n Web's type system, but this path invokes
     // native Worker RPC and needs its actual runtime type.
-    let gadget = await this.getGadgetFacet(gadgetId, chatId) as unknown as NativeRpcStub<any>;
+    let gadget =
+        await this.getGadgetFacet(gadgetId, chatId, undefined, user) as unknown as NativeRpcStub<any>;
     try {
       let formats = await readCustomExportFormats(handler, gadget);
       return formats === null
@@ -10979,7 +10995,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new GadgetClientImpl(this.impl, record.id, this.clientUserId,
-        () => this.#viewer(), this.#mintedCapabilityKind());
+        () => this.#user(), this.#mintedCapabilityKind());
   }
 
   async getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>> {
@@ -10987,11 +11003,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new GadgetClientImpl(this.impl, id, this.clientUserId,
-        () => this.#viewer(), this.#mintedCapabilityKind());
+        () => this.#user(), this.#mintedCapabilityKind());
   }
 
-  async #viewer(): Promise<GadgetViewer> {
-    return this.impl.gadgetViewer(this.clientProfileId, "build",
+  async #user(): Promise<GadgetUser> {
+    return this.impl.gadgetUser(this.clientProfileId, "build",
         (await this.#getClientProfile()).name);
   }
 
@@ -12283,8 +12299,19 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     this.#leaveSession = this.impl.joinSession("use");
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "use",
-        () => retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger));
+        () => this.#getClientProfile());
     this.#leaveOutputsFanout = this.impl.joinOutputsFanout(this.clientUserId);
+  }
+
+  #clientProfile?: Promise<AiChatAuthorInfo>;
+
+  // Fetched once, for presence and connectToGadget(); retried after a failure.
+  #getClientProfile(): Promise<AiChatAuthorInfo> {
+    return this.#clientProfile ??= retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger)
+        .catch((err: unknown) => {
+          this.#clientProfile = undefined;
+          throw err;
+        });
   }
 
   // Fresh stub per call; see OverseerClientInterface.#clientUser.
@@ -12407,8 +12434,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new UseGadgetClientInterface(this.impl, id, this.clientUserId, async () =>
-        this.impl.gadgetViewer(this.clientProfileId, "use",
-            (await retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger)).name));
+        this.impl.gadgetUser(this.clientProfileId, "use", (await this.#getClientProfile()).name));
   }
 
   // --- Denied methods (build-only) ---
@@ -12564,7 +12590,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
   #leaveSession?: () => void;
 
   constructor(private impl: OverseerImpl, private id: WorkpieceId,
-      private clientUserId: string, private viewer: () => Promise<GadgetViewer>,
+      private clientUserId: string, private user: () => Promise<GadgetUser>,
       private joinedAs?: SessionKind) {
     super();
     if (joinedAs) this.#leaveSession = impl.joinSession(joinedAs);
@@ -12612,7 +12638,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts exactly as this capability does (joinedAs): it can outlive this
     // object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, chatId, this.joinedAs, await this.viewer());
+    return this.impl.getGadgetFacet(this.id, chatId, this.joinedAs, await this.user());
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -12620,7 +12646,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
   }
 
   async export(formatId: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
-    return this.impl.exportGadget(this.id, formatId, chatId);
+    return this.impl.exportGadget(this.id, formatId, chatId, await this.user());
   }
 
   async listBindings(chatId?: number): Promise<GadgetBindingInfo[]> {
@@ -12834,7 +12860,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
   #leaveSession: () => void;
 
   constructor(private impl: OverseerImpl, private id: WorkpieceId,
-      private clientUserId: string, private viewer: () => Promise<GadgetViewer>) {
+      private clientUserId: string, private user: () => Promise<GadgetUser>) {
     super();
     this.#leaveSession = impl.joinSession("use");
   }
@@ -12883,7 +12909,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts as a "use" session for its own lifetime, like this interface: it can
     // outlive this object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, undefined, "use", await this.viewer());
+    return this.impl.getGadgetFacet(this.id, undefined, "use", await this.user());
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -12893,7 +12919,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
 
   async export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.exportGadget(this.id, id);
+    return this.impl.exportGadget(this.id, id, undefined, await this.user());
   }
 
   // --- Denied methods (build-only) ---
