@@ -1,61 +1,43 @@
 import type { DurableObject, RpcTarget } from "cloudflare:workers";
 
 /**
- * Name of the optional Gadget method through which the Workshop opens a per-viewer session:
- * `connectViewer(viewer: GadgetViewer): RpcTarget`. When a gadget implements it,
- * connectToGadget() hands the client the returned session instead of the gadget itself.
- *
- * Reserved: every gadget stub the Workshop hands out refuses it (see OverseerImpl.getGadgetFacet),
- * so only connectToGadget() can call it. Neither the browser, the agent, another gadget nor a hook
- * can open a session as someone else.
+ * Optional Gadget method through which connectToGadget() tells a gadget who is connecting. The
+ * client then receives the RpcTarget it returns instead of the gadget. Every gadget stub the
+ * Workshop hands out refuses this method (see OverseerImpl.getGadgetFacet).
  */
 export const GADGET_VIEWER_METHOD = "connectViewer";
 
 /**
- * The person behind one connectToGadget() connection, as established by the Workshop.
- *
- * The Workshop authenticates the viewer; the gadget authorizes. A gadget's rules and stored
- * records are only as trustworthy as everyone who can change its code or data: its "build"
- * collaborators (the owner among them) and any agent they run, including unmerged code an agent
- * tests against the gadget's live storage. So a gadget's own rules bind "use" viewers only.
+ * The user behind one connectToGadget() call, as authenticated by the Workshop. Gadget rules bind
+ * "use" viewers only: "build" viewers (including the owner) can change the gadget's code and data.
  */
 export type GadgetViewer = {
-  /**
-   * Opaque id, stable for this person within this workspace. It cannot be computed from their
-   * username or email, and is unrelated to their id in any other workspace.
-   */
+  /** Stable for this user within this workspace; unrelated to their username, email or other ids. */
   id: string;
 
-  /** The viewer's display name when the connection opened. For display only. */
+  /** Chosen by the user; not unique. */
   displayName: string;
 
-  /**
-   * The access this connection was admitted with, already enforced by the Workshop (the owner
-   * connects as "build"). A "build" viewer can change the gadget's code, so the gadget cannot hold
-   * them to its own rules.
-   */
   role: "build" | "use";
 };
 
-/** A gadget facet that implements the GADGET_VIEWER_METHOD handshake. */
+/** A gadget that implements GADGET_VIEWER_METHOD. */
 export type GadgetWithViewers = DurableObject & {
   connectViewer(viewer: GadgetViewer): RpcTarget;
 };
 
-/** Derives GadgetViewer.id: HMAC-SHA-256 of the profile id, keyed by the workspace's key (hex). */
+/** HMAC-SHA-256 of `profileId` under the workspace's key (both hex). */
 export async function gadgetViewerId(workspaceKey: string, profileId: string): Promise<string> {
   let key = await crypto.subtle.importKey(
       "raw", Uint8Array.fromHex(workspaceKey), { name: "HMAC", hash: "SHA-256" },
       false, ["sign"]);
-  let sig = new Uint8Array(await crypto.subtle.sign(
-      "HMAC", key, new TextEncoder().encode(profileId)));
-  return sig.toHex();
+  let sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(profileId));
+  return new Uint8Array(sig).toHex();
 }
 
 /**
- * Whether `error` is the runtime's report that the gadget doesn't implement GADGET_VIEWER_METHOD.
- * Deliberately exact: a gadget whose handshake throws to turn a viewer away must not fall back to
- * handing that viewer the gadget itself.
+ * Whether `error` means the gadget doesn't implement GADGET_VIEWER_METHOD. Exact on purpose: a
+ * gadget that throws to turn a viewer away must not fall back to handing them the gadget itself.
  */
 export function isViewerMethodMissing(error: unknown): boolean {
   return error instanceof Error && error.message ===

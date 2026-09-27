@@ -1175,9 +1175,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // collaborators (enforced by SharingManager).
       ownerInvitesOnly: singleton(false),
 
-      // Random key (hex) that GadgetViewer ids are derived under, generated on first use (see
-      // gadgetViewer()). Being per-workspace and secret, it keeps a person's viewer id unlinkable
-      // across workspaces and uncomputable from their profile id.
+      // Secret key (hex) for GadgetViewer ids, generated on first use by gadgetViewer().
       viewerIdKey: <string | undefined>undefined,
     },
 
@@ -5074,8 +5072,8 @@ class OverseerImpl implements AgentHooks {
   // `this.ctx.restore()` -- to hand a persistent callback to a spawned agent or a hook -- would
   // throw. Every stub to a gadget facet therefore comes from here; only [restore]() itself, which
   // is what ctx.restore() invokes, touches the raw facet (see #getGadgetFacetRaw).
-  async getGadgetFacetFetcher(gadgetId: WorkpieceId, chatId?: number)
-      : Promise<Fetcher<DurableObject>> {
+  async getGadgetFacetFetcher<T extends DurableObject = DurableObject>(
+      gadgetId: WorkpieceId, chatId?: number): Promise<Fetcher<T>> {
     let params: OverseerRestoreParams = {type: "gadget", gadgetId};
     chatId = this.#resolveGadgetChatId(gadgetId, chatId);
     if (chatId !== undefined) params.chatId = chatId;
@@ -5141,8 +5139,7 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  // The identity connectToGadget() presents to a gadget's viewer handshake on behalf of the
-  // session holding `profileId` (see gadget-viewer.ts).
+  // The GadgetViewer that connectToGadget() presents on behalf of `profileId`.
   async gadgetViewer(profileId: string, role: GadgetViewer["role"], displayName: string)
       : Promise<GadgetViewer> {
     let key = this.storage.viewerIdKey.get();
@@ -5163,25 +5160,21 @@ class OverseerImpl implements AgentHooks {
   // mints; omitted for the owner's and for internal callers (binding loopbacks already live
   // inside a counted session).
   //
-  // `viewer` is passed only by connectToGadget(). If the gadget implements the viewer handshake
-  // (see gadget-viewer.ts), the stub returned is the session it opens for that viewer rather than
-  // the facet itself. The handshake is refused through every stub returned here, which is what
-  // makes it callable by connectToGadget() alone.
+  // `viewer` is passed only by connectToGadget(). If the gadget implements GADGET_VIEWER_METHOD,
+  // the stub wraps what that returns instead of the facet. Every stub returned here refuses that
+  // method, so connectToGadget() is the only caller.
   //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
   async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
       viewer?: GadgetViewer): Promise<RpcStub<any>> {
-    let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
+    let facet = await this.getGadgetFacetFetcher<GadgetWithViewers>(gadgetId, chatId);
     let connection: object = facet;
     if (viewer) {
       try {
-        connection = await (facet as Fetcher<GadgetWithViewers>).connectViewer(viewer);
+        connection = await facet.connectViewer(viewer);
       } catch (err) {
-        if (isViewerMethodMissing(err)) {
-          // The gadget predates the handshake: connect to the gadget itself.
-        } else {
-          // Surfaced the same way as the proxy below surfaces other gadget method errors.
+        if (!isViewerMethodMissing(err)) {
           this.deliverGadgetLogs(chatId ?? null, [{
             timestamp: new Date(),
             level: "error",
@@ -5206,8 +5199,8 @@ class OverseerImpl implements AgentHooks {
 
         // The lease ends when the client disposes the stub. (The DO reset that severs sessions
         // releases it implicitly, by discarding this object -- and joinSession's leave is
-        // idempotent, so a double dispose is harmless.) Disposal always reaches the target: a
-        // viewer session's end is how the gadget learns its viewer left.
+        // idempotent, so a double dispose is harmless.) Disposal always reaches the target, since
+        // a viewer session's disposer is how its gadget learns the viewer left.
         if (prop === Symbol.dispose) {
           let inner = Reflect.get(target, prop, target);
           return () => {
@@ -12566,8 +12559,6 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 // collaborator mints, omitted for the owner's and for internal construction): a client can dispose
 // the parent interface while retaining this one, and a retained capability that escaped the count
 // would let a scope widening find no session to sever.
-//
-// `viewer` produces the identity connectToGadget() presents to the gadget (see gadget-viewer.ts).
 @validateRpc()
 class GadgetClientImpl extends RpcTarget implements GadgetClient {
   #leaveSession?: () => void;
