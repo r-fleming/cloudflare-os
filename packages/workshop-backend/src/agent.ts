@@ -849,11 +849,21 @@ DO NOT import \`RpcTarget\` in client.js. It is already imported.
 
 If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:workers".
 
+## Knowing who is calling
+
+In server code, \`viewer()\` from \`"gadgets:viewer"\` returns the signed-in user whose client made the current call, as \`{id, displayName, role}\` (\`id\` is stable and opaque; \`displayName\` is not unique; \`role\` is \`"build"\` or \`"use"\`). It is \`null\` for calls from \`executeCode\`, hooks and other gadgets, and inside objects a method returned: to keep the viewer, capture it when creating the object (e.g. an \`openSession()\` method returning an \`RpcTarget\`, whose \`[Symbol.dispose]\` runs when the client disconnects). Never take a user's identity as a parameter. Rules bind \`"use"\` viewers only: \`"build"\` viewers and their agents can change the Gadget.
+
+\`\`\`
+let me = viewer();  // in a Gadget method
+if (!me) throw new Error("Only people can comment.");
+await this.ctx.storage.put(key, { text, authorId: me.id, author: me.displayName });
+\`\`\`
+
 ## Design Tips
 
 * ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
-* Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make any move. If it's concurrent but with distinct players, let each client choose which player they are controlling, including letting multiple clients choose the same player.
+* Clients may frequently reload, and there is no client-side storage. When a Gadget needs to know who a client is (authorship, assignments, approvals, a player seat that survives reloads), use \`viewer()\` (see above) rather than asking the user to type a name. Otherwise, for example in a casual multiplayer game, it's fine to let any connected client choose to be any player.
 * If a Gadget contains a README.md file, use it to describe that Gadget at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
 
 ## Exporting files from Gadgets
