@@ -5192,7 +5192,7 @@ class OverseerImpl implements AgentHooks {
     let proxy = new Proxy(connection, {
       get(target, prop, receiver) {
         if (prop === GADGET_VIEWER_METHOD) {
-          return async () => {
+          return () => {
             throw new Error(`${GADGET_VIEWER_METHOD}() can only be called by the Workshop.`);
           };
         }

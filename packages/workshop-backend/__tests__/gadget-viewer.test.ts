@@ -50,6 +50,12 @@ import { DurableObject } from "cloudflare:workers";
 export class Gadget extends DurableObject { hello() { return "hi"; } }
 `;
 
+// The error a native RPC call fails with. (Unlike `expect().rejects`, handling the RpcPromise's
+// rejection directly keeps it from also being reported as unhandled.)
+function rejection(call: Promise<unknown>): Promise<string | null> {
+  return call.then(() => null, (error: unknown) => String(error));
+}
+
 const ALICE: GadgetViewer = { id: "v-alice", displayName: "Alice", role: "use" };
 
 let doCounter = 0;
@@ -95,13 +101,13 @@ describe("the viewer handshake", () => {
     // What the agent, other gadgets, hooks and exports receive: no viewer.
     using facet = await impl.getGadgetFacet(GADGET_ID);
     expect(await facet.hello()).toBe("hi");
-    await expect(facet.connectViewer({ ...ALICE, id: "v-mallory" }))
-        .rejects.toThrow("can only be called by the Workshop");
+    expect(await rejection(facet.connectViewer({ ...ALICE, id: "v-mallory" })))
+        .toContain("can only be called by the Workshop");
 
     // Nor can a connected viewer open a second session as someone else.
     using session = await impl.getGadgetFacet(GADGET_ID, undefined, undefined, ALICE);
-    await expect(session.connectViewer({ ...ALICE, id: "v-mallory" }))
-        .rejects.toThrow("can only be called by the Workshop");
+    expect(await rejection(session.connectViewer({ ...ALICE, id: "v-mallory" })))
+        .toContain("can only be called by the Workshop");
   }));
 
   it("connects a gadget without the handshake to the gadget itself",
