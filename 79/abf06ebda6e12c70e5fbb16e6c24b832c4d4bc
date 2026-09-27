@@ -1,0 +1,27 @@
+packages/workshop-backend/__tests__/gadget-user.test.ts
+  s_c630575fa29d65::t_bbcfb5f1767789 1-180
+packages/workshop-backend/__tests__/observer-scope-restart.test.ts
+  s_c630575fa29d65::t_47c61f0986136e 954
+packages/workshop-backend/src/gadget-user.ts
+  s_c630575fa29d65::t_f57111f2bca906 1-92
+packages/workshop-backend/src/overseer.ts
+  s_c630575fa29d65::t_cc3456e2650733 70-78,1179-1182,5035,5048-5056,5063-5064,5066,5156-5175,5186-5188,5191-5192,5194,5202-5207,5229-5234,5308,5311-5312,5339-5340,5352-5353,10998,11005-11011,12302,12306-12316,12436-12437,12593-12594,12641,12649,12863,12912,12922
+packages/workshop-shared/src/api.ts
+  s_c630575fa29d65::t_de46ec7a59929e 4359-4361
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "79abf06ebda6e12c70e5fbb16e6c24b832c4d4bc",
+  "prompts": {},
+  "sessions": {
+    "s_c630575fa29d65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f264500beffeSTbDtmYgswQVRn",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
