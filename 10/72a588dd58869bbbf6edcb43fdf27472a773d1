@@ -1,0 +1,37 @@
+packages/bundled-blueprints/blueprints/approvals/blueprint.json
+  s_c630575fa29d65::t_df4224f6a44f20 1-22
+packages/bundled-blueprints/blueprints/approvals/files/README.md
+  s_ee8b3d9b64ef4c::t_6248054fd00d92 1-31
+packages/bundled-blueprints/blueprints/approvals/files/client.ts
+  s_c630575fa29d65::t_5db85fe1dd18f1 1-200
+packages/bundled-blueprints/blueprints/approvals/files/lib/protocol.ts
+  s_c630575fa29d65::t_bdda06b929828e 1-56
+packages/bundled-blueprints/blueprints/approvals/files/server.ts
+  s_ee8b3d9b64ef4c::t_96e112000a0643 1-175
+packages/integration-tests/__tests__/gadget-user-approvals.test.ts
+  s_c630575fa29d65::t_20535e19017c4b 1-143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1072a588dd58869bbbf6edcb43fdf27472a773d1",
+  "prompts": {},
+  "sessions": {
+    "s_c630575fa29d65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f264500beffeSTbDtmYgswQVRn",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    },
+    "s_ee8b3d9b64ef4c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f843a4931ffeRLycSpEWGlvTYE",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
