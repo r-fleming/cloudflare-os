@@ -21,8 +21,7 @@
 // imports is checked here, while a DOM-touching editor module the server never reaches is checked
 // only by the client program.
 //
-// `files: []` alongside `include`: a blueprint set with no TypeScript is a valid state (every
-// blueprint may be plain JavaScript), and without it tsc reports "no inputs found" as an error.
+// `files` declares `gadgets:user`, the module the Workshop adds to every gadget worker.
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
@@ -39,6 +38,6 @@
     "types": ["@cloudflare/workers-types/experimental"],
     "noEmit": true
   },
-  "files": [],
+  "files": ["types/gadgets-user.d.ts"],
   "include": ["blueprints/*/files/server.ts", "libraries/*/server.ts"]
 }

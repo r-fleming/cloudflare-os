@@ -347,6 +347,7 @@ describe("bundled blueprint TypeScript sources", () => {
   it.each([
     ["client", "yjs"],
     ["client", "cloudflare:workers"],
+    ["client", "gadgets:user"],
     ["server", "zod"],
   ])("rejects %s.ts importing %s, which its runtime does not supply", async (entry, specifier) => {
     let directory = await sourceTree({
@@ -773,11 +774,13 @@ describe("bundled blueprint TypeScript sources", () => {
     let supplied = await sourceTree({
       "server.ts": [
         'import { DurableObject } from "cloudflare:workers";',
-        "export class Gadget extends DurableObject {}",
+        'import { currentUser } from "gadgets:user";',
+        "export class Gadget extends DurableObject { who() { return currentUser(); } }",
       ].join("\n"),
     });
     let files = await readSourceFiles(supplied, "example/files");
     expect(files.get("server.js")).toMatch(/from "cloudflare:workers";/u);
+    expect(files.get("server.js")).toMatch(/from "gadgets:user";/u);
 
     // And only that one: the gadget's worker loader supplies no other `cloudflare:` module, so a
     // Durable Object importing one has to fail here rather than when it is instantiated.

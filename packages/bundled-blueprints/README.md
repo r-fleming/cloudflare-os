@@ -66,10 +66,11 @@ only TypeScript is build input. A blueprint is written in TypeScript or in JavaS
 `.js` module in a tree that holds `.ts` is rejected, since it would ship as written beside bundles
 it cannot share code with. Non-module files pass through either way.
 
-`cloudflare:workers` is the only import left for the runtime to resolve, and only on the server:
-the client is loaded as an ES module in a sandboxed iframe with nothing to resolve a bare import
-against, and the server as a Durable Object whose module map holds the gadget's own files and whose
-loader supplies no other `cloudflare:` module. Everything else a blueprint imports must be a file it
+`cloudflare:workers` and `gadgets:user` (whose `currentUser()` tells the server which user made a
+call) are the only imports left for the runtime to resolve, and only on the server: the client is
+loaded as an ES module in a sandboxed iframe with nothing to resolve a bare import against, and the
+server as a Durable Object whose module map holds the gadget's own files plus `gadgets:user`, and
+whose loader supplies no other `cloudflare:` module. Everything else a blueprint imports must be a file it
 owns or a library, so `import "yjs"` is a build error rather than a module that goes missing inside
 the sandbox, and tree-shaking annotations are ignored, so a `"sideEffects": false` in an enclosing
 package.json cannot drop a side-effect-only import from the bundle.
@@ -146,7 +147,7 @@ and run under `pnpm test` (jsdom by default; a pure module's or a server's test 
 named `server.test.ts` or `<topic>.server.test.ts`, which is what puts it under the Workers types
 rather than the DOM's; at run time it gets `cloudflare:workers` as a stub of its base classes
 (`__tests__/stubs/cloudflare-workers.ts`), so a Durable Object can be constructed over in-memory
-storage. The archives the build produces are still installed and inspected inside workerd by the
+storage, and `gadgets:user` as a stub where no user is calling (`__tests__/stubs/gadgets-user.ts`). The archives the build produces are still installed and inspected inside workerd by the
 Workshop backend's suite. Only `blueprint.json` and `files/` are read by the build, so `__tests__/`
 (and anything else beside them) is repo-only and never part of the archive.
 

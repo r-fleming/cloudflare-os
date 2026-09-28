@@ -12,7 +12,8 @@ const here = dirname(fileURLToPath(import.meta.url));
  *   so they get a jsdom document by default; a pure module's test opts into node with a
  *   `// @vitest-environment node` header. A blueprint's `@gadgets/bundled-blueprints/libraries/...`
  *   import is this package referring to itself by name, which Vite resolves through the `exports`
- *   in package.json with no alias; `cloudflare:workers` is aliased to a stub of its base classes,
+ *   in package.json with no alias; `cloudflare:workers` is aliased to a stub of its base classes
+ *   (and `gadgets:user` to one where no user is calling),
  *   so a module that declares a Durable Object can be imported at all -- the archives the build
  *   produces are still installed and inspected inside workerd by the Workshop backend's suite.
  * - `build`: the build itself (`__tests__/**`), whose TypeScript bundling drives esbuild's native
@@ -35,6 +36,10 @@ export default defineConfig({
             {
               find: "cloudflare:workers",
               replacement: resolve(here, "__tests__/stubs/cloudflare-workers.ts"),
+            },
+            {
+              find: "gadgets:user",
+              replacement: resolve(here, "__tests__/stubs/gadgets-user.ts"),
             },
           ],
         },
