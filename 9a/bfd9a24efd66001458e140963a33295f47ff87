@@ -1,0 +1,19 @@
+packages/integration-tests/__tests__/gadget-user-approvals.test.ts
+  s_c630575fa29d65::t_60fdfa491ddebd 50,100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9abfd9a24efd66001458e140963a33295f47ff87",
+  "prompts": {},
+  "sessions": {
+    "s_c630575fa29d65": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f264500beffeSTbDtmYgswQVRn",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
