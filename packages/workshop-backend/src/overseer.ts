@@ -69,11 +69,11 @@ import {
 } from "./gadget-export";
 import {
   GADGET_MAIN_MODULE,
+  GADGET_MAIN_MODULE_SOURCE,
   GADGET_USER_METHOD,
   GADGET_USER_MODULE,
   GADGET_USER_MODULE_SOURCE,
   type GadgetUser,
-  gadgetMainModuleSource,
   gadgetUserId,
 } from "./gadget-user";
 
@@ -1177,8 +1177,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // collaborators (enforced by SharingManager).
       ownerInvitesOnly: singleton(false),
 
-      // Secret (hex) that GadgetUser ids and the GADGET_USER_METHOD secret derive from; see
-      // #userSecret().
+      // Secret (hex) that GadgetUser ids are derived from; see #userSecret().
       userIdSecret: <string | undefined>undefined,
     },
 
@@ -5050,7 +5049,7 @@ class OverseerImpl implements AgentHooks {
       let mainModule = "server.js";
       if (modules[mainModule] !== undefined) {
         modules[GADGET_USER_MODULE] = {js: GADGET_USER_MODULE_SOURCE};
-        modules[GADGET_MAIN_MODULE] = {js: gadgetMainModuleSource(await this.#gadgetCallSecret())};
+        modules[GADGET_MAIN_MODULE] = {js: GADGET_MAIN_MODULE_SOURCE};
         mainModule = GADGET_MAIN_MODULE;
       }
 
@@ -5162,11 +5161,6 @@ class OverseerImpl implements AgentHooks {
     return secret;
   }
 
-  // Derived rather than userIdSecret itself, which gadget code must not learn.
-  #gadgetCallSecret(): Promise<string> {
-    return gadgetUserId(this.#userSecret(), GADGET_USER_METHOD);
-  }
-
   // The GadgetUser that connectToGadget() presents on behalf of `profileId`.
   async gadgetUser(profileId: string, role: GadgetUser["role"], displayName: string)
       : Promise<GadgetUser> {
@@ -5191,7 +5185,6 @@ class OverseerImpl implements AgentHooks {
   async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
       user?: GadgetUser): Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
-    let callSecret = user && await this.#gadgetCallSecret();
     let leaveSession = joinAs ? this.joinSession(joinAs) : undefined;
 
     let self = this;
@@ -5229,7 +5222,7 @@ class OverseerImpl implements AgentHooks {
         if (user) {
           let callAsUser = Reflect.get(target, GADGET_USER_METHOD, target);
           method = (...args: any[]) =>
-            Reflect.apply(callAsUser, target, [callSecret, user, prop, args]);
+            Reflect.apply(callAsUser, target, [user, prop, args]);
         }
 
         // HACK: We're going to assume all top-level properties are methods, and we are going to
