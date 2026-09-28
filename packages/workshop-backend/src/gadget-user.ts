@@ -23,8 +23,7 @@ export async function gadgetUserId(workspaceSecret: string, profileId: string): 
 
 /**
  * Method, added to every Gadget class, through which a connectToGadget() stub makes each call on
- * behalf of its user. Every gadget stub the Workshop hands out refuses it, and it also requires a
- * per-workspace secret that only the Workshop and the gadget's generated main module hold.
+ * behalf of its user. Every gadget stub the Workshop hands out refuses it.
  */
 export const GADGET_USER_METHOD = "callAsUser";
 
@@ -60,15 +59,14 @@ function isRpcMethod(object, name) {
   return false;
 }
 
-export function withUsers(Base, secret) {
+export function withUsers(Base) {
   if (typeof Base !== "function") {
     return class Gadget {
       constructor() { throw new Error('server.js must export a class named "Gadget".'); }
     };
   }
   return class Gadget extends Base {
-    ${GADGET_USER_METHOD}(key, user, name, args) {
-      if (key !== secret) throw new Error("${GADGET_USER_METHOD}() can only be called by the Workshop.");
+    ${GADGET_USER_METHOD}(user, name, args) {
       if (!isRpcMethod(this, name)) {
         throw new TypeError(\`The RPC receiver does not implement the method "\${name}".\`);
       }
@@ -81,12 +79,10 @@ export function withUsers(Base, secret) {
 /** Main module of a gadget worker with a server.js: re-exports it, with its Gadget wrapped. */
 export const GADGET_MAIN_MODULE = "gadgets:main";
 
-/** Source of GADGET_MAIN_MODULE for a workspace whose user secret is `secret`. */
-export function gadgetMainModuleSource(secret: string): string {
-  return `
+/** Source of GADGET_MAIN_MODULE. */
+export const GADGET_MAIN_MODULE_SOURCE = `
 import { withUsers } from "${GADGET_USER_MODULE}";
 import * as gadget from "./server.js";
 export * from "./server.js";
-export const Gadget = withUsers(gadget.Gadget, ${JSON.stringify(secret)});
+export const Gadget = withUsers(gadget.Gadget);
 `;
-}
