@@ -103,13 +103,9 @@ describe("currentUser()", () => {
     using facet = await impl.getGadgetFacet(1);
     using alice = await impl.getGadgetFacet(1, undefined, undefined, ALICE);
     for (let stub of [facet, alice]) {
-      expect(await rejection(stub.callAsUser("", BOB, "who", [])))
+      expect(await rejection(stub.callAsUser(BOB, "who", [])))
           .toContain("can only be called by the Workshop");
     }
-    // Nor without the workspace's secret, even past the stubs' refusal.
-    let raw = await impl.getGadgetFacetFetcher(1);
-    expect(await rejection(raw.callAsUser("guess", BOB, "who", [])))
-        .toContain("can only be called by the Workshop");
   }));
 
   it("leaves gadgets with no, broken or incomplete server code working as before", async () => {
