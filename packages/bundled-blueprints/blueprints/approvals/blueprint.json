@@ -1,0 +1,22 @@
+{
+  "$comment": "Demonstrates currentUser() from gadgets:user: the Workshop tells the gadget who made each call, so requests are attributed to signed-in people and nobody can approve their own. Its rules bind use collaborators only; builders can change its code and data.",
+  "blueprintId": "demo.approvals",
+  "title": "Approvals",
+  "description": "Submit requests and have them approved by someone else. Every request and decision is attributed to the signed-in person who made it.",
+  "output": {
+    "id": "approvals",
+    "noun": "Approvals",
+    "plural": "Approvals",
+    "icon": "listChecks"
+  },
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 1,
+  "created": "2026-09-28T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-09-28T00:00:00.000Z",
+  "bindings": {}
+}
