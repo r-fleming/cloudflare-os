@@ -47,7 +47,7 @@ type User = { id: string; displayName: string; role: string };
 // Workshop's reserved dispatch method, which a connection must not be able to call.
 type Session = {
   whoami(): User;
-  callAsUser(secret: string, user: User, name: string, args: unknown[]): unknown;
+  callAsUser(user: User, name: string, args: unknown[]): unknown;
   subscribe(listener: Listener): View;
   submit(title: string, detail: string): void;
   decide(requestId: string, outcome: string, note: string): void;
@@ -97,7 +97,7 @@ it("attributes requests and decisions to the signed-in people, not the browser",
   expect(requesterMe.id).toMatch(/^[0-9a-f]{64}$/);  // opaque, not the username
 
   // A browser can't act as someone else: only the Workshop may present a user.
-  await expect(requesterSession.callAsUser("", ownerMe, "whoami", []))
+  await expect(requesterSession.callAsUser(ownerMe, "whoami", []))
       .rejects.toThrow("can only be called by the Workshop");
 
   const ownerView = new Listener();
