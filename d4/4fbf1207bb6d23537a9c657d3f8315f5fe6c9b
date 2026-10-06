@@ -1,0 +1,44 @@
+packages/bundled-blueprints/blueprints/workspace-sheets/files/README.md
+  s_c59a5934b3b141::t_aee0b417044c06 106,127,131,151
+  s_c59a5934b3b141::t_ecdccaf902a90c 171
+  s_c59a5934b3b141::t_2c3300997da693 182,194,226-227
+packages/bundled-blueprints/blueprints/workspace-sheets/files/client.ts
+  s_c59a5934b3b141::t_7b49de31d9eb37 1204,1213-1232,1240-1250,1254,1257,1267-1268,1270-1271,1284,1286-1287,1319-1325,1328-1329,1335,1338,1342-1354,1362-1365,1367-1378,1382-1383,1388-1390,1392-1393,1400-1401,1406-1412,1415-1419,1432,1444-1450,1453-1466,1519-1527,2072,2077,2400-2401,2511-2512,2525,2537,2539,2596,2603-2623,2627-2633,2635-2636,2638-2639,2641-2652,2654,2657,2662,2664,2667-2668,2671
+  s_c59a5934b3b141::t_6fb9bfbdb42064 2655
+  s_c59a5934b3b141::t_71624507482384 1303-1309,1424-1425,1451-1452,2653
+  s_c59a5934b3b141::t_465422bddd2f04 49,1288,1310,1426-1431,1433,2656,2658-2661,2663
+  s_c59a5934b3b141::t_5c15acf1b8ce4d 1420,1434,1440,2665-2666,2669-2670,2672,2683-2687
+packages/bundled-blueprints/blueprints/workspace-sheets/__tests__/xlsx.server.test.ts
+  s_c59a5934b3b141::t_271a8bdf7f4c32 931-950
+  s_c59a5934b3b141::t_993f4585fb992e 160-161,163-164,166-171,173,179-184,831-930,951-953,957,962,964-965
+  s_c59a5934b3b141::t_3cc5edf498a6f5 954-956,958-961,963,966-976
+packages/bundled-blueprints/blueprints/workspace-sheets/__tests__/structure.test.ts
+  s_c59a5934b3b141::t_d5f0198e3467c5 1-81
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/structure.ts
+  s_c59a5934b3b141::t_7010480f268e8f 1-86,88,90
+  s_c59a5934b3b141::t_95c5278c370f8b 87,89,91-92
+packages/bundled-blueprints/blueprints/workspace-sheets/files/server.ts
+  s_c59a5934b3b141::t_1dc47542459185 392-397,417,427-428
+  s_c59a5934b3b141::t_d93344bb033856 171-173,382
+  s_c59a5934b3b141::t_1c8477f755069d 369-381,383-391
+  s_c59a5934b3b141::t_10aff0e46352cd 23-24,96,98-101,135-136,139-140,143,146-147,151-154,156,158-165,168,170,174-180,193,195-196,222-235,238-244,247-257,260-264,266-267,274,277-279,338-339,343,352-353,357-360,366-368
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/protocol.ts
+  s_c59a5934b3b141::t_89014176b6a344 66-71,76,96-102,106,109,137-138,140-142,146-147,170-174,179
+  s_c59a5934b3b141::t_e57679fbaf0ef9 75,139,153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d44fbf1207bb6d23537a9c657d3f8315f5fe6c9b",
+  "prompts": {},
+  "sessions": {
+    "s_c59a5934b3b141": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ef4731ff2ffeHd73LSoIc1KDAj",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
