@@ -63,10 +63,17 @@ export interface SheetsDocument extends DocumentMeta {
   cells: Record<string, CellMap>;
 }
 
-/** The workbook structure as a client sends it: last-writer-wins, applied wholesale; anything omitted keeps its stored value. */
+/**
+ * The structure changes a client sends; anything omitted keeps its stored value. A sheet is
+ * created only by listing it in `addedSheets`, and removed only by listing it in `removedSheets`:
+ * one `sheetOrder` leaves out is kept, at the end, and one it lists that the server lacks is not
+ * created.
+ */
 export interface StructureUpdate {
   title?: string;
   sheetOrder?: string[];
+  addedSheets?: string[];
+  removedSheets?: string[];
   sheets?: Record<string, Partial<SheetMeta>>;
 }
 
@@ -86,13 +93,20 @@ export interface CellOp {
   baseVersion: number;
 }
 
-/** A whole-sheet cell replacement, used for sort, insert/delete and other operations that move many cells at once. */
+/**
+ * A whole-sheet cell replacement, used for sort, insert/delete and other operations that move many
+ * cells at once. `baseVersions` is every cell's version in the copy the replacement was built
+ * from; when present, the server rejects the operation if the sheet has changed since. The server
+ * stores every replaced cell at one version above any the sheet held, and reports the result in
+ * `replacedCells`.
+ */
 export interface SheetReplacement {
   sheetId: string;
   cells: CellMap;
+  baseVersions?: Record<string, number>;
 }
 
-/** What a client sends to `applyOperation`: any combination of a structure snapshot, sheet replacements and per-cell edits. */
+/** What a client sends to `applyOperation`: any combination of a structure update, sheet replacements and per-cell edits. */
 export interface Operation {
   senderId?: string;
   structure?: StructureUpdate | null;
@@ -120,18 +134,23 @@ export interface CellConflict {
   cell: Cell;
 }
 
-/** The first thing a client reads in a reply: `applied` if anything changed, `conflict` if anything was rejected, else `unchanged`. */
-export type OperationStatus = "applied" | "conflict" | "unchanged";
+/**
+ * The first thing a client reads in a reply: `applied` if anything changed, `conflict` if a cell
+ * edit was rejected, `rejected` if the whole operation was refused and nothing was written (see
+ * `reason`), else `unchanged`.
+ */
+export type OperationStatus = "applied" | "conflict" | "rejected" | "unchanged";
 
 /**
  * A committed operation as the server broadcasts it to every subscriber: the new revision, the
- * structure after it, the per-cell diffs, and for each replaced sheet its full new cell map.
+ * structure after it when the operation changed it, the per-cell diffs, and for each replaced
+ * sheet its full new cell map.
  */
 export interface OperationEvent {
   type: "operation";
   senderId: string | undefined;
   revision: number;
-  structure: Structure;
+  structure?: Structure;
   upserts: CellUpsert[];
   deletes: CellDeletion[];
   replacedSheets: string[];
@@ -148,11 +167,16 @@ export interface SnapshotEvent {
 /** What the server delivers to a subscriber's `operation` callback. */
 export type SubscriberEvent = OperationEvent | SnapshotEvent;
 
-/** What `applyOperation` returns: the status and rejected cells, plus the committed event's fields when anything changed. */
+/**
+ * What `applyOperation` returns: the status and rejected cells, plus the committed event's fields
+ * when anything changed. `structure` is present whenever the operation carried one, changed or
+ * not: what the server now holds.
+ */
 export interface OperationResult extends Partial<OperationEvent> {
   status: OperationStatus;
   revision: number;
   conflicts: CellConflict[];
+  reason?: "stale" | "too-large";
 }
 
 /** How a subscriber introduces itself: the id its events carry, and how to draw it. */
