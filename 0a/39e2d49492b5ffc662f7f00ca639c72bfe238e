@@ -1,0 +1,29 @@
+packages/bundled-blueprints/blueprints/workspace-sheets/__tests__/xlsx.server.test.ts
+  s_c59a5934b3b141::t_1d56308d656942 1132,1240,1242,1249-1250,1252-1254
+packages/bundled-blueprints/blueprints/workspace-sheets/files/README.md
+  s_c59a5934b3b141::t_3ec7cb8186800a 165,187,247
+packages/bundled-blueprints/blueprints/workspace-sheets/files/client.ts
+  s_c59a5934b3b141::t_0936d8824f9e2a 1567-1568,1661,1678,2730-2744,4981,5437,5464,5467-5474,5479-5480,5497,5529-5530,5616
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/protocol.ts
+  s_c59a5934b3b141::t_6aa53b3f282957 142-144,149,244-248
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/xlsx.ts
+  s_c59a5934b3b141::t_00874b1c9adcae 734,738,796-797
+packages/bundled-blueprints/blueprints/workspace-sheets/files/server.ts
+  s_c59a5934b3b141::t_794c1326f75dee 187,191-195,245-246,248,253-257,259,293,400,402-404,406-407
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0a39e2d49492b5ffc662f7f00ca639c72bfe238e",
+  "prompts": {},
+  "sessions": {
+    "s_c59a5934b3b141": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ef4731ff2ffeHd73LSoIc1KDAj",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
