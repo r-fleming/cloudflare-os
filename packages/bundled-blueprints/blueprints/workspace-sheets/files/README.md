@@ -26,6 +26,7 @@ A lightweight, persistent spreadsheet Gadget with a familiar grid interface, for
   - `=SUM(A1:A10)`
   - `=IF(B2>100,"High","Low")`
   - `=VLOOKUP(E2,A2:C20,3,FALSE)`
+  - `=COUNTIF(A2:A20,'Complete')` (single-quoted text is accepted in addition to double quotes)
   - `=Sheet2!A1*2`
 - Use the name box to jump to a cell or range such as `D12` or `A1:C8`.
 - Right-click the grid for cut/copy/paste and row or column actions.

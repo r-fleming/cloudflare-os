@@ -633,6 +633,37 @@ describe("Workspace Sheets XLSX", () => {
     })).toThrow("XLSX fill count exceeds Excel's limit of 256");
   });
 
+  it("converts the grid's single-quoted string literals to Excel's form, leaving backslashes alone", async () => {
+    const cells = {
+      A1: cell("=COUNTIF(A2:A20,'Complete')"),
+      A2: cell("='It''s'&'say \"hi\"'&\"c\"\"d\""),
+      A3: cell("='It''s'!A1&'x'"),
+      A4: cell("='Jan':'It''s'!A1"),
+      A5: cell("=Table1[[A'[B]]&'q'"),
+      A6: cell("='unterminated"),
+      A7: cell("='esc\\'"),
+      A8: cell("=\"tail\\\""),
+      A9: cell("='don\\'!t'"),
+    };
+    const {entries} = await readZip(exportXlsx({
+      sheetOrder: ["sheet", "its"],
+      sheets: {sheet: sheet("Sheet"), its: sheet("It's")},
+      cells: {sheet: cells, its: {}},
+    }));
+    const worksheet = text(entries, "xl/worksheets/sheet1.xml");
+
+    expect(cellXml(worksheet, "A1")).toContain('<f>COUNTIF(A2:A20,"Complete")</f>');
+    expect(cellXml(worksheet, "A2")).toContain('<f>"It\'s"&amp;"say ""hi"""&amp;"c""d"</f>');
+    expect(cellXml(worksheet, "A3")).toContain("<f>'It''s'!A1&amp;\"x\"</f>");
+    expect(cellXml(worksheet, "A4")).toContain("<f>'Jan':'It''s'!A1</f>");
+    expect(cellXml(worksheet, "A5")).toContain("<f>Table1[[A'[B]]&amp;\"q\"</f>");
+    expect(cellXml(worksheet, "A6")).toContain('t="inlineStr"');
+    expect(cellXml(worksheet, "A7")).toContain('<f>"esc\\"</f>');
+    expect(cellXml(worksheet, "A8")).toContain('<f>"tail\\"</f>');
+    // `'don\'` is a sheet name here, leaving `t'` unterminated.
+    expect(cellXml(worksheet, "A9")).toContain('t="inlineStr"');
+  });
+
   it("ignores v5-only metadata while exporting ordinary and materialized pivot cells", async () => {
     const document = {
       sheetOrder: ["v5"],
