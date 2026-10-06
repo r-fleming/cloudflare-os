@@ -1,0 +1,19 @@
+packages/bundled-blueprints/blueprints/workspace-sheets/files/client.ts
+  s_c59a5934b3b141::t_6e56e829b94493 5346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "da213a528015e15fdb66cfd5056e527a0baac76e",
+  "prompts": {},
+  "sessions": {
+    "s_c59a5934b3b141": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ef4731ff2ffeHd73LSoIc1KDAj",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
