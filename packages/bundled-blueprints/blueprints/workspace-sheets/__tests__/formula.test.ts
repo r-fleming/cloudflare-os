@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { type Ast, CellError, parseFormula, serializeAst, tokenize, unwrapParens } from "../files/lib/formula.ts";
+import { type Ast, CellError, parseFormula, serializeAst, tokenize, unquoteSheetName, unwrapParens } from "../files/lib/formula.ts";
 
 describe("the formula tokenizer", () => {
   it("reads numbers, strings, operators, references and quoted sheet names", () => {
@@ -9,6 +9,31 @@ describe("the formula tokenizer", () => {
       { t: "comma" }, { t: "num", v: 1500 }, { t: "rp" }, { t: "op", v: "&" }, { t: "str", v: 'a"b' },
       { t: "op", v: "<>" }, { t: "word", v: "'My Sheet'!C3" },
     ]);
+  });
+
+  it("reads a single-quoted run as text unless a sheet reference follows it", () => {
+    expect(tokenize("'abc'")).toEqual([{ t: "str", v: "abc" }]);
+    expect(tokenize("'it''s' & 'Q1'!A1")).toEqual([
+      { t: "str", v: "it's" }, { t: "op", v: "&" }, { t: "word", v: "'Q1'!A1" },
+    ]);
+    expect(tokenize("''")).toEqual([{ t: "str", v: "" }]);
+    // Written back, a single-quoted literal takes the double-quoted form it means.
+    expect(serializeAst(parseFormula("'it''s'&A1"))).toBe('"it\'s"&A1');
+  });
+
+  it("reads a backslash as an ordinary character, as Excel does", () => {
+    expect(tokenize('"C:\\"&A1')).toEqual([{ t: "str", v: "C:\\" }, { t: "op", v: "&" }, { t: "word", v: "A1" }]);
+    expect(serializeAst(parseFormula('SUBSTITUTE(A1,"\\","/")'))).toBe('SUBSTITUTE(A1,"\\","/")');
+    expect(tokenize("'Data\\'!A1")).toEqual([{ t: "word", v: "'Data\\'!A1" }]);
+  });
+
+  it("keeps a doubled quote in a sheet name escaped, so the word writes back unchanged", () => {
+    expect(tokenize("'O''Brien'!B2")).toEqual([{ t: "word", v: "'O''Brien'!B2" }]);
+    expect(serializeAst(parseFormula("'O''Brien'!B2+1"))).toBe("'O''Brien'!B2+1");
+    expect(unquoteSheetName("'O''Brien'")).toBe("O'Brien");
+    expect(unquoteSheetName("Plain")).toBe("Plain");
+    expect(unquoteSheetName("'Q1!Q2'")).toBe("Q1!Q2");
+    expect(tokenize("'Q1!Q2'!A1")).toEqual([{ t: "word", v: "'Q1!Q2'!A1" }]);
   });
 });
 
@@ -44,6 +69,17 @@ describe("the formula parser", () => {
       try { parseFormula(src); } catch (e) { thrown = e; }
       expect(thrown, src).toBeInstanceOf(CellError);
     }
+  });
+
+  it.each(["1 2", "A1)", "SUM(A1))", "A1 B1"])("rejects %s, which has tokens after a complete expression", (src) => {
+    let thrown: unknown;
+    try { parseFormula(src); } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(CellError);
+    expect(String(thrown)).toBe("#VALUE!");
+  });
+
+  it("still accepts a call whose closing parenthesis is missing", () => {
+    expect(parseFormula("SUM(A1")).toEqual({ k: "call", name: "SUM", args: [{ k: "ref", ref: "A1" }] });
   });
 
   it("keeps parentheses when writing a formula back", () => {

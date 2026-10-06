@@ -26,6 +26,7 @@ A lightweight, persistent spreadsheet Gadget with a familiar grid interface, for
   - `=SUM(A1:A10)`
   - `=IF(B2>100,"High","Low")`
   - `=VLOOKUP(E2,A2:C20,3,FALSE)`
+  - `=COUNTIF(A2:A20,'Complete')` (single-quoted text is accepted in addition to double quotes)
   - `=Sheet2!A1*2`
 - Use the name box to jump to a cell or range such as `D12` or `A1:C8`.
 - Right-click the grid for cut/copy/paste and row or column actions.
@@ -228,6 +229,7 @@ even though remote operations still synchronize.
 - Structural edits and sorting clear local undo/redo history.
 - Formula reference adjustment during row/column changes is limited to references on the current sheet.
 - Formula support is broad but is not intended to be fully compatible with Excel or Google Sheets.
+- A formula with anything left after a complete expression (a `;` separator, an extra `)`, Excel's space intersection operator) shows `#VALUE!`; the XLSX export may still write it as a formula.
 - Frozen row/column metadata exists in the model, but the current UI does not expose controls for it.
 
 ## CSV export
@@ -250,10 +252,11 @@ commas, a leading `$` or a trailing `%`. Everything else is text; date-looking t
 
 Formulas are written without cached results and the workbook requests a full recalculation on open,
 so Excel evaluates them itself. To keep them valid there, the exporter rewrites cross-sheet
-references to the exported worksheet names, prefixes OOXML "future functions" (`IFS`, `CONCAT`, ...)
+references to the exported worksheet names, converts single-quoted string literals
+(`'Complete'`) to Excel's double-quote form, prefixes OOXML "future functions" (`IFS`, `CONCAT`, ...)
 with `_xlfn.`, renames `ERRORTYPE()` to `ERROR.TYPE()`, and drops whitespace between a function
 name and its `(`. A formula that is empty, structurally unbalanced (unterminated string or quoted
-name, mismatched parentheses or brackets — the grid's parser tolerates these) or that would exceed
+name, mismatched parentheses or brackets — the grid completes a missing `)`) or that would exceed
 Excel's 8,192-character limit after rewriting is exported as text, since one such formula makes
 Excel report the whole workbook as damaged. Formula semantics are otherwise not translated (for
 example `^` associativity differs, and a reference outside the grid such as `XFE1` is empty here

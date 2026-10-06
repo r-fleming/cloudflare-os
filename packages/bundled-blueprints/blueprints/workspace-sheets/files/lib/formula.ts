@@ -33,10 +33,13 @@ export function tokenize(src: string): Token[] {
   while (i < n) {
     const ch = src[i];
     if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") { i++; continue; }
-    if (ch === '"') {
+    // A single-quoted run is a sheet name only when `!` follows it (`'My Sheet'!A1`); otherwise it
+    // is a string literal, as many users type `='abc'` expecting text.
+    if (ch === '"' || (ch === "'" && !quotedSheetAt(src, i))) {
+      const quote = ch;
       let j = i + 1, str = "";
       while (j < n) {
-        if (src[j] === '"') { if (src[j + 1] === '"') { str += '"'; j += 2; continue; } j++; break; }
+        if (src[j] === quote) { if (src[j + 1] === quote) { str += quote; j += 2; continue; } j++; break; }
         str += src[j++];
       }
       tokens.push({ t: "str", v: str }); i = j; continue;
@@ -57,9 +60,14 @@ export function tokenize(src: string): Token[] {
     // word: letters/digits/$/./! and quoted sheet names 'My Sheet'!
     if (/[A-Za-z_$]/.test(ch) || ch === "'") {
       let j = i, word = "";
-      if (ch === "'") { // 'Sheet Name'!Ref
+      if (ch === "'") { // 'Sheet Name'!Ref, with `''` standing for a quote in the name
         j++;
-        while (j < n && src[j] !== "'") word += src[j++];
+        while (j < n) {
+          if (src[j] === "'") { if (src[j + 1] === "'") { word += "''"; j += 2; continue; } break; }
+          word += src[j++];
+        }
+        // The word keeps the name quoted and escaped, so a formula written back (serializeAst)
+        // reads the same; the evaluator unescapes it when it looks the sheet up.
         j++; word = "'" + word + "'";
       } else {
         while (j < n && /[A-Za-z0-9_$.]/.test(src[j])) word += src[j++];
@@ -70,6 +78,21 @@ export function tokenize(src: string): Token[] {
     i++; // skip unknown
   }
   return tokens;
+}
+
+/** Whether the `'` at `start` opens a quoted sheet name, i.e. its closing quote is followed by `!`. */
+function quotedSheetAt(src: string, start: number): boolean {
+  let j = start + 1;
+  while (j < src.length) {
+    if (src[j] === "'") { if (src[j + 1] === "'") { j += 2; continue; } return src[j + 1] === "!"; }
+    j++;
+  }
+  return false;
+}
+
+/** A quoted sheet name as a formula word holds it (`'O''Brien'`), unquoted and unescaped (`O'Brien`). */
+export function unquoteSheetName(name: string): string {
+  return /^'[\s\S]*'$/.test(name) ? name.slice(1, -1).replace(/''/g, "'") : name;
 }
 
 // --- Parser (produces AST) ---
@@ -148,6 +171,9 @@ export function parseFormula(src: string): Ast {
     throw ERR.VALUE();
   }
   const ast = parseExpr(0);
+  // Anything left over (`=1 2`, `=A1)`) is not part of the expression; evaluating only the prefix
+  // would show a value for a formula that does not mean it.
+  if (pos !== tokens.length) throw ERR.VALUE();
   return ast;
 }
 const BP: Record<string, { lbp: number; right?: boolean }> = {
