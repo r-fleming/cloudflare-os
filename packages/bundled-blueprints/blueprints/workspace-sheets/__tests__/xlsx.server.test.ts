@@ -850,7 +850,7 @@ describe("Workspace Sheets document snapshots", () => {
     expect(document.sheets.big.charts?.map((chart) => chart.range)).toEqual(["", "A1:D50000"]);
     expect(document.sheets.big.pivot?.sourceRange).toBe("");
     expect(document.sheets.pivot.pivot?.sourceRange).toBe("A1:D50");
-    // Its source is gone, so there is nothing to bound it by; the client leaves the output alone.
+    // Its source is gone, so there is nothing to bound it by.
     expect(document.sheets.orphan.pivot?.sourceRange).toBe("A1:B2");
   });
 
@@ -952,6 +952,26 @@ describe("Workspace Sheets document snapshots", () => {
     const result = await fixture.applyOperation({senderId: "b", structure: {removedSheets: ["sheet", "third"]}} as never);
     expect(result).toMatchObject({status: "unchanged", structure: {sheetOrder: ["sheet", "third"]}});
     expect(await order()).toEqual(["sheet", "third"]);
+  });
+
+  it("adds a sheet with its cells in one operation, and ignores a replacement of a sheet it removes", async () => {
+    const fixture = inMemoryGadget();
+    // A duplicated sheet: added, left out of the order it was sent with, and filled at once.
+    const added = await fixture.applyOperation({senderId: "test",
+      structure: {sheetOrder: ["sheet"], addedSheets: ["copy"], sheets: {copy: sheet("Copy")}},
+      sheetReplacements: [{sheetId: "copy", cells: {A1: cell("x")}, baseVersions: {}}]} as never);
+    expect(added.status).toBe("applied");
+    let document = await fixture.getDocument();
+    expect(document.sheetOrder).toEqual(["sheet", "copy"]);
+    expect(document.cells.copy).toEqual({A1: {value: "x", fmt: null, version: 2}});
+
+    const removed = await fixture.applyOperation({senderId: "test", structure: {removedSheets: ["copy"]},
+      sheetReplacements: [{sheetId: "copy", cells: {A1: cell("y")}}, {sheetId: "sheet", cells: {B1: cell("first")}}, {sheetId: "sheet", cells: {B1: cell("last")}}]} as never);
+    expect(removed.replacedSheets).toEqual(["sheet"]);
+    document = await fixture.getDocument();
+    expect(document.sheetOrder).toEqual(["sheet"]);
+    expect(document.cells).not.toHaveProperty("copy");
+    expect(document.cells.sheet.B1.value).toBe("last");
   });
 
   it("lets an edit shrink metadata that is already over the storage limit", async () => {

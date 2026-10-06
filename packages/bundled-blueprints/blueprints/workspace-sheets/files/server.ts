@@ -185,8 +185,9 @@ export class Gadget extends DurableObject<unknown, unknown> {
 
     // --- Whole-sheet cell replacement (sort, clear, insert/delete) ------
     const replacements: { id: string; cells: CellMap; floor: number }[] = [];
-    for (const rep of operation.sheetReplacements || []) {
-      const id = String(rep.sheetId || "");
+    // A sheet replaced twice in one operation keeps the last replacement.
+    const lastReplacements = new Map((operation.sheetReplacements || []).map((rep) => [String(rep.sheetId || ""), rep]));
+    for (const [id, rep] of lastReplacements) {
       if (!sheets[id]) continue;
       const stored = await this.loadCells(id);
       if (rep.baseVersions && !sameVersions(stored, rep.baseVersions)) return rejected("stale");
@@ -383,7 +384,7 @@ function sheetMeta(s: Partial<SheetMeta> & Pick<SheetMeta, "id">): SheetMeta {
 
 // The sheets named by `order`, sanitized. A pivot's range is bounded by its source sheet, which
 // may come later in the order, so that happens once every sheet's size is known; a pivot whose
-// source is gone keeps its range, and the client leaves its output alone.
+// source is gone keeps its range, since there is nothing to bound it by.
 function normalizeSheets(order: string[], sheets: Record<string, Partial<SheetMeta>>): Record<string, SheetMeta> {
   const out: Record<string, SheetMeta> = {};
   for (const id of order) out[id] = sheetMeta({ ...sheets[id], id });

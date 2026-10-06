@@ -1299,25 +1299,14 @@ function scheduleSave(): void {
 // Sends everything queued as one operation and adopts what the server acknowledged.
 //
 // A rejected call is retried by the scheduler, and a rejection is ambiguous: the socket may have
-// dropped after the server committed and before the reply arrived. The cell ops may be replayed
-// through that -- each carries the version it was based on, captured when it was queued, not
-// re-read at send time, since a resync below, or a peer's edit landing during the debounce, moves
-// the model's version past what the edit saw, and re-reading would send a stale edit as current;
-// the server rejects a stale one as a conflict -- but the structure snapshot and the sheet
-// replacements carry no version and are applied wholesale, last writer wins, so replaying them
-// onto a document that moved in the meantime (our own commit, a collaborator's, or both) would
-// silently overwrite whatever moved it. They may only go out against the revision they were built
-// on, which is captured when the first of them is queued -- not the model's current revision,
-// which a collaborator's broadcast advances while the payload sits in the queue, so comparing
-// against it would pass a snapshot that predates the peer's edit and overwrite it. After a failure
-// the next attempt asks for the document first, and if its revision is not that one, drops both,
-// adopts the server's copy and sends only the cell ops -- and only those on sheets no dropped
-// replacement had moved under them, since a cell op is replayable only where its coordinate still
-// names the cell it edited. A wholesale edit queued while a save is in flight is built at the
-// pre-ack revision, so a failure of the *next* save drops it: the loss every failure had before
-// the resync, confined to that timing. With nothing wholesale pending there is no base and no
-// reload; the cell ops protect themselves. The server could not check this for us with a base
-// revision: the revision moves on every cell edit, so a rename would fail whenever anyone typed.
+// dropped after the server committed and before the reply arrived. A cell op carries the version
+// its edit was made on, captured when it was queued (re-read at send time, a stale edit would pass
+// as current), so the server refuses a replayed one that no longer applies. The structure patch
+// and the sheet replacements are not safe to replay onto a document that has moved since: a patch
+// would overwrite a collaborator's fields, and a replacement would be refused against our own
+// landed commit. So after a failure the next attempt first reads the document, and if its revision
+// is not the one the oldest of them was built on (`wholesaleBaseRevision`), drops them, adopts the
+// server's copy and sends only the cell ops on sheets no dropped replacement had moved.
 async function sendPendingOperation(): Promise<SaveOutcome> {
   if (resyncBeforeSave && wholesaleBaseRevision === null) {
     // Nothing wholesale is pending, and a stale cell op is rejected on its own version.
@@ -1390,6 +1379,8 @@ async function sendPendingOperation(): Promise<SaveOutcome> {
   }
   if (pendingStructure === null && pendingReplacements.size === 0) wholesaleBaseRevision = null;
 
+  // A collaborator's broadcast committed after ours may have arrived first; its structure is newer.
+  const replyIsCurrent = (result.revision || 0) >= model.revision;
   model.revision = Math.max(model.revision, result.revision || 0);
   // Adopt acknowledged versions. An edit typed while this call was in flight replaced its entry
   // and stays pending; it was made on top of what the call carried, and only our write could
@@ -1435,10 +1426,11 @@ async function sendPendingOperation(): Promise<SaveOutcome> {
   // becomes the base that one is diffed against, so whatever the server lacks -- a
   // collaborator's change that our save replaced, merged in while it was in flight -- is sent
   // again.
-  if (result.structure && !pendingStructure) {
+  // A newer broadcast, applied already, set the base itself.
+  if (replyIsCurrent && result.structure && !pendingStructure) {
     applyStructure(result.structure);
     renderTabs();
-  } else if (result.structure || sentStructure) {
+  } else if (replyIsCurrent && (result.structure || sentStructure)) {
     ackedStructure = result.structure ?? sentStructure;
   }
   rebuildEngine();
@@ -1462,6 +1454,8 @@ function discardWholesaleChanges(doc: SheetsDocument, notice: string): void {
   // save is a loss the user sees and can redo; writing the wrong cell is not. The undo
   // history presumes that layout too. Cell ops on sheets with no replacement stay queued.
   for (const sheetId of pendingReplacements.keys()) dropCellOpsFor(sheetId);
+  // So does an edit in progress there.
+  if (editing && pendingReplacements.has(editing.sheetId)) cancelEdit();
   pendingReplacements.clear();
   pendingReplacementBases.clear();
   remotelyEditedSheets.clear();
@@ -2503,7 +2497,7 @@ function addSheet(): void {
   const id = "s_" + Math.random().toString(36).slice(2, 8);
   let n = model.sheetOrder.length + 1;
   while (model.sheetOrder.some((sid) => model.sheets[sid].name === "Sheet" + n)) n++;
-  model.sheets[id] = { id, name: "Sheet" + n, rows: 100, cols: 26, colWidths: {}, rowHeights: {}, frozenRows: 0, frozenCols: 0 };
+  model.sheets[id] = { id, name: "Sheet" + n, rows: 100, cols: 26, colWidths: {}, rowHeights: {}, frozenRows: 0, frozenCols: 0, filter: null, charts: [], comments: [], pivot: null };
   model.sheetOrder.push(id);
   model.cells[id] = {};
   activeSheetId = id;
@@ -2512,7 +2506,8 @@ function addSheet(): void {
 }
 async function renameSheet(id: string): Promise<void> {
   const name = await promptInline("Rename sheet:", model.sheets[id].name);
-  if (name == null) return;
+  // A collaborator may have deleted the sheet while the prompt was open.
+  if (name == null || !model.sheets[id]) return;
   const clean = name.trim().slice(0, 60);
   if (clean) { model.sheets[id].name = clean; queueStructure(); renderTabs(); rebuildEngine(); renderGrid(); }
 }
@@ -2525,7 +2520,7 @@ function sheetTabMenu(id: string, e: MouseEvent): void {
   showCtx(menu, e.clientX, e.clientY);
 }
 function duplicateSheet(id: string): void {
-  const src = model.sheets[id];
+  const src = model.sheets[id]; if (!src) return;
   const nid = "s_" + Math.random().toString(36).slice(2, 8);
   model.sheets[nid] = { ...JSON.parse(JSON.stringify(src)), id: nid, name: src.name + " copy" };
   model.cells[nid] = JSON.parse(JSON.stringify(model.cells[id] || {}));
@@ -2537,6 +2532,7 @@ function duplicateSheet(id: string): void {
 function deleteSheet(id: string): void {
   if (model.sheetOrder.length <= 1) return;
   const idx = model.sheetOrder.indexOf(id);
+  if (idx < 0) return;
   model.sheetOrder.splice(idx, 1);
   delete model.sheets[id]; delete model.cells[id];
   if (activeSheetId === id) activeSheetId = model.sheetOrder[Math.max(0, idx - 1)];
@@ -2746,7 +2742,7 @@ function applySnapshot(doc: SheetsDocument): void {
   serverVersions.clear();
   for (const id of model.sheetOrder) noteServerCells(id, model.cells[id]);
   ackedStructure = structureSnapshot();
-  titleInput.value = model.title;
+  if (document.activeElement !== titleInput) titleInput.value = model.title;
   if (!activeSheetId || !model.sheets[activeSheetId]) { if (editing) cancelEdit(); activeSheetId = model.sheetOrder[0]; }
   applyingRemote = false;
   rebuildEngine();

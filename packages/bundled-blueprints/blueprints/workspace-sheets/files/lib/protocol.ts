@@ -40,9 +40,10 @@ export type Dims = Record<string, number>;
 /**
  * A sheet's data filter. `row` is the header row and `endRow` the table's last row; `columns` are
  * the table's zero-based columns. `criteria` maps a column (as a string) to the filter tokens
- * whose rows stay visible (see the client's `filterToken`). `rowOrder` is the table's body rows in
- * their natural order before the current filter sort, so the sort can be cleared, and empty when
- * there is no sort; `sort` is the column the filter menu sorted by, if any.
+ * whose rows stay visible: `s:` and a cell's text, `n:` and a number, `b:1` or `b:0`, `e:` and an
+ * error value, or `z:` for an empty cell. `rowOrder` is the table's body rows in their natural
+ * order before the current filter sort, so the sort can be cleared, and empty when there is no
+ * sort; `sort` is the column the filter menu sorted by, if any.
  */
 export interface SheetFilter {
   row: number;

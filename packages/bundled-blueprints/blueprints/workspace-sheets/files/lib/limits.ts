@@ -1,4 +1,5 @@
-// Limits and enumerations the Sheets client, server and exporter all enforce.
+// Limits and enumerations for a workbook's stored metadata. The server enforces them; they live
+// here so the client and the exporter can apply the same ones.
 import type { ChartType, PivotAggregate } from "./protocol.ts";
 
 /** The largest sheet: rows and columns. */
