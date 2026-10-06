@@ -1,0 +1,27 @@
+packages/bundled-blueprints/blueprints/workspace-sheets/__tests__/xlsx.server.test.ts
+  s_c59a5934b3b141::t_271a8bdf7f4c32 853,957-976
+packages/bundled-blueprints/blueprints/workspace-sheets/files/client.ts
+  s_c59a5934b3b141::t_71624507482384 1302-1309,1382-1383,1429-1430,1433,1457-1458,2500,2509-2510,2523,2535,2745
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/limits.ts
+  s_c59a5934b3b141::t_891617621a33f2 1-2
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/protocol.ts
+  s_c59a5934b3b141::t_7972b0d076c642 43-46
+packages/bundled-blueprints/blueprints/workspace-sheets/files/server.ts
+  s_c59a5934b3b141::t_d93344bb033856 188-190,387
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "64e39453be6ab417c3942455e9843699a797250a",
+  "prompts": {},
+  "sessions": {
+    "s_c59a5934b3b141": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ef4731ff2ffeHd73LSoIc1KDAj",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
