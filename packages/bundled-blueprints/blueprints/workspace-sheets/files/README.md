@@ -103,7 +103,7 @@ const result = await gadget.applyOperation({
 
 A cell's `value` is always stored as text. Begin a value with `=` to create a formula. To delete a cell completely, send both `value: null` and `fmt: null` with the current `baseVersion`.
 
-Check `result.status` after writing. It is `applied`, `unchanged`, or `conflict`. On a conflict, inspect `result.conflicts`, re-read the document, and retry against the latest cell versions rather than overwriting blindly.
+Check `result.status` after writing. It is `applied`, `unchanged`, `conflict`, or `rejected`. On a conflict, inspect `result.conflicts`, re-read the document, and retry against the latest cell versions rather than overwriting blindly. A `rejected` operation wrote nothing: `result.reason` is `stale` (a sheet replacement's `baseVersions` no longer match) or `too-large` (the workbook's metadata would exceed the storage limit).
 
 ### Replace a whole sheet
 
@@ -124,11 +124,11 @@ await gadget.applyOperation({
 });
 ```
 
-A whole-sheet replacement overwrites that sheet's complete cell map, so merge with existing data first if it must be preserved. It does not use per-cell conflict checks.
+A whole-sheet replacement overwrites that sheet's complete cell map, so merge with existing data first if it must be preserved. To have it refused if the sheet changed after you read it, pass `baseVersions`: every cell's `version` from that read, keyed by reference. The server stores every replaced cell at a new version, higher than any the sheet held, and returns the stored cells in `result.replacedCells`; use those versions for later edits. A cell operation in the same call is applied on top of the replacement, against the versions it carried.
 
 ### Change workbook structure
 
-Pass a complete structure snapshot to change the title, sheet order, names, dimensions, or sizing metadata. Because structure uses last-writer-wins semantics, start with the latest document and preserve every sheet that should remain:
+Pass a structure update to change the title, sheet order, names, dimensions, or sizing metadata. Fields and sheets the update leaves out keep their stored values; `sheetOrder`, when sent, sets the order of the sheets it lists. Structure is last-writer-wins per field, so start with the latest document:
 
 ```js
 const doc = await gadget.getDocument();
@@ -138,11 +138,8 @@ await gadget.applyOperation({
   senderId: "setup-script",
   structure: {
     title: "Quarterly plan",
-    sheetOrder: doc.sheetOrder,
     sheets: {
-      ...doc.sheets,
       [sheetId]: {
-        ...doc.sheets[sheetId],
         name: "Summary",
         colWidths: { ...doc.sheets[sheetId].colWidths, 0: 180 },
       },
@@ -151,7 +148,7 @@ await gadget.applyOperation({
 });
 ```
 
-Omitting an existing sheet from `sheetOrder` deletes it and its stored cells. Adding a new sheet ID creates empty storage for it. When adding a sheet and its initial data together, include both `structure` and a matching `sheetReplacements` entry in the same operation.
+To add sheets, list their IDs in `addedSheets` and their metadata in `sheets`; each gets empty cell storage. To delete sheets and their stored cells, list their IDs in `removedSheets`; the last sheet cannot be deleted. A sheet omitted from `sheetOrder` is kept and moved to the end, and an unknown ID in it is ignored. When a structure was sent, `result.structure` is the structure the server now holds. When adding a sheet and its initial data together, include both `structure` and a matching `sheetReplacements` entry in the same operation. The workbook's metadata shares one storage value, so a structure update that would push it past the limit, and grow it, is rejected.
 
 Formatting keys accepted by the server are `b` (bold), `i` (italic), `u` (underline), `s` (strikethrough), `c` (text color), `bg` (fill color), `a` (`l`, `c`, or `r` alignment), `nf` (number format), `d` (decimal places), `fs` (font size), and `wrap`. Colors must be hexadecimal strings such as `#1d1d20`.
 
@@ -171,7 +168,7 @@ awaited, so a callback may re-enter the queue). The cell model, the formula engi
 sheet tabs and the exports are this gadget's own.
 
 In the repository the source is TypeScript under `blueprints/workspace-sheets/files/`
-(`client.ts`, `server.ts`, `lib/protocol.ts`, `lib/formula.ts`, `lib/xlsx.ts`, `lib/zip.ts`), which the build bundles
+(`client.ts`, `server.ts`, `lib/protocol.ts`, `lib/structure.ts`, `lib/formula.ts`, `lib/xlsx.ts`, `lib/zip.ts`), which the build bundles
 into the `client.js` and `server.js` shipped here.
 
 ### `client.js`
@@ -182,7 +179,7 @@ Builds the entire browser interface in JavaScript. It contains:
 - Cell editing, formatting, sorting, and structural operations
 - Formula tokenization, parsing, evaluation, and display formatting
 - Clipboard and keyboard support
-- A local model whose saves are queued per cell and flushed by the library's scheduler
+- A local model whose saves are queued per cell and flushed by the library's scheduler; structure is sent as the fields this tab changed, and a remote structure change is merged with this tab's pending one field by field
 - RPC callbacks for live server operations and presence events
 
 Formula evaluation happens in the browser. The engine caches computed cells, detects circular references, supports ranges and cross-sheet references, and displays standard errors including `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#N/A`, `#NUM!`, and `#CYCLE!`.
@@ -194,7 +191,7 @@ Exports the Durable Object class `Gadget`, which is the authoritative persistenc
 - Stores spreadsheet metadata and each sheet's cells in Durable Object storage
 - Serializes mutations and document snapshots through the library's mutation queue
 - Applies per-cell optimistic concurrency using cell versions
-- Uses last-writer-wins semantics for document structure
+- Uses last-writer-wins semantics for document structure, per field, and refuses a sheet replacement built on cells that have since changed
 - Broadcasts operations and presence events through the library's subscriber registry after the queue releases, best-effort and without awaiting them, so a callback may itself read or write the document and a hung subscriber holds up only its own client
 - Sanitizes titles, dimensions, cell contents, references, and formatting
 - Advertises and produces the server-side workbook and CSV exports
@@ -226,7 +223,8 @@ even though remote operations still synchronize.
 ## Current limitations
 
 - There is no file import workflow; clipboard operations use tab-separated text.
-- Structural edits and sorting clear local undo/redo history.
+- Structural edits and sorting clear local undo/redo history; a collaborator rearranging a sheet (sorting, inserting or deleting rows) drops the history for that sheet, along with any unsaved edits to it.
+- A collaborator's edit made before a sort reached them is refused where a cell now stands, but lands in a position the sort emptied.
 - Formula reference adjustment during row/column changes is limited to references on the current sheet.
 - Formula support is broad but is not intended to be fully compatible with Excel or Google Sheets.
 - A formula with anything left after a complete expression (a `;` separator, an extra `)`, Excel's space intersection operator) shows `#VALUE!`; the XLSX export may still write it as a formula.

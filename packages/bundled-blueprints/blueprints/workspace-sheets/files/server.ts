@@ -20,6 +20,8 @@ import type {
   SheetMeta,
   SheetsDocument,
   SheetsPresenceEvent,
+  Structure,
+  StructureUpdate,
   SubscriberCallbacks,
 } from "./lib/protocol.ts";
 
@@ -91,7 +93,12 @@ export class Gadget extends DurableObject<unknown, unknown> {
       };
       await this.ctx.storage.put("meta", meta);
       await this.ctx.storage.put("cells:" + id, {});
+      return meta;
     }
+    // Every read goes through the same sanitizers as a write: a workbook saved by another version
+    // may hold sheet fields this one does not keep, and a structure update is compared against
+    // the stored sheets to tell whether it changed anything.
+    meta.sheets = normalizeSheets(meta.sheetOrder, meta.sheets);
     return meta;
   }
 
@@ -125,51 +132,52 @@ export class Gadget extends DurableObject<unknown, unknown> {
     return result;
   }
 
+  // Everything is checked before anything is written, so a rejected operation leaves storage as
+  // it was.
   async applyOperationLocked(operation: Operation): Promise<LockedOutcome> {
     const meta = await this.loadMeta();
-    let changed = false;
+    const rejected = (reason: OperationResult["reason"]): LockedOutcome =>
+      ({ result: { status: "rejected", revision: meta.revision, conflicts: [], reason } });
 
     // --- Structure (last-writer-wins) ------------------------------------
+    let nextStructure: Structure | null = null;
     if (operation.structure) {
       const s = operation.structure;
-      const order = Array.isArray(s.sheetOrder) ? s.sheetOrder.map(String) : meta.sheetOrder;
-      const nextSheets: Record<string, SheetMeta> = {};
+      const order = mergeSheetOrder(meta, s);
+      const merged: Record<string, Partial<SheetMeta>> = {};
       for (const id of order) {
         const incoming: Partial<SheetMeta> = s.sheets?.[id] || {};
         const existing: Partial<SheetMeta> = meta.sheets[id] || {};
-        nextSheets[id] = sheetMeta({
-          id,
-          name: incoming.name ?? existing.name ?? "Sheet",
-          rows: incoming.rows ?? existing.rows,
-          cols: incoming.cols ?? existing.cols,
-          colWidths: incoming.colWidths ?? existing.colWidths,
-          rowHeights: incoming.rowHeights ?? existing.rowHeights,
-          frozenRows: incoming.frozenRows ?? existing.frozenRows,
-          frozenCols: incoming.frozenCols ?? existing.frozenCols,
-        });
-        if (!(await this.ctx.storage.get("cells:" + id))) {
-          await this.ctx.storage.put("cells:" + id, {});
+        // A key the client left out (or sent as null) keeps the stored value.
+        const sheet: Record<string, unknown> = { ...existing, id };
+        for (const [key, value] of Object.entries(incoming)) {
+          if (key !== "id" && value != null) sheet[key] = value;
         }
+        merged[id] = sheet;
       }
-      // Drop cells for removed sheets.
-      for (const id of meta.sheetOrder) {
-        if (!nextSheets[id]) await this.ctx.storage.delete("cells:" + id);
+      const nextSheets = normalizeSheets(order, merged);
+      const title = typeof s.title === "string" ? s.title.slice(0, 200) || DEFAULT_TITLE : meta.title;
+      const structureChanged = title !== meta.title || JSON.stringify([order, nextSheets]) !== JSON.stringify([meta.sheetOrder, meta.sheets]);
+      if (structureChanged) {
+        // An edit that shrinks an oversized meta is let through.
+        const length = JSON.stringify({ ...meta, sheetOrder: order, sheets: nextSheets, title }).length;
+        if (length > MAX_META_CHARACTERS && length > JSON.stringify(meta).length) return rejected("too-large");
+        nextStructure = { sheetOrder: order, sheets: nextSheets, title };
       }
-      meta.sheetOrder = order;
-      meta.sheets = nextSheets;
-      if (typeof s.title === "string") meta.title = s.title.slice(0, 200) || DEFAULT_TITLE;
-      changed = true;
     }
+    const sheets = nextStructure?.sheets ?? meta.sheets;
 
-    // Whole-sheet cell replacement (used by sort / clear / insert-delete).
-    if (Array.isArray(operation.sheetReplacements)) {
-      for (const rep of operation.sheetReplacements) {
-        const id = String(rep.sheetId || "");
-        if (!meta.sheets[id]) continue;
-        const cells = sanitizeCellMap(rep.cells);
-        await this.ctx.storage.put("cells:" + id, cells);
-        changed = true;
-      }
+    // --- Whole-sheet cell replacement (sort, clear, insert/delete) ------
+    const replacements: { id: string; cells: CellMap; floor: number }[] = [];
+    // A sheet replaced twice in one operation keeps the last replacement.
+    const lastReplacements = new Map((operation.sheetReplacements || []).map((rep) => [String(rep.sheetId || ""), rep]));
+    for (const [id, rep] of lastReplacements) {
+      if (!sheets[id]) continue;
+      const stored = await this.loadCells(id);
+      if (rep.baseVersions && !sameVersions(stored, rep.baseVersions)) return rejected("stale");
+      let floor = 0;
+      for (const cell of Object.values(stored)) floor = Math.max(floor, cell.version);
+      replacements.push({ id, cells: sanitizeCellMap(rep.cells), floor });
     }
 
     // --- Per-cell operations (optimistic concurrency) --------------------
@@ -182,9 +190,10 @@ export class Gadget extends DurableObject<unknown, unknown> {
       if (!bySheet.has(sid)) bySheet.set(sid, []);
       bySheet.get(sid)!.push(op);
     }
+    const editedCells = new Map<string, CellMap>();
     for (const [sheetId, ops] of bySheet) {
-      if (!meta.sheets[sheetId]) continue;
-      const cells = await this.loadCells(sheetId);
+      if (!sheets[sheetId]) continue;
+      const cells = replacements.find((rep) => rep.id === sheetId)?.cells ?? await this.loadCells(sheetId);
       let dirty = false;
       for (const op of ops) {
         const ref = String(op.ref || "");
@@ -210,37 +219,64 @@ export class Gadget extends DurableObject<unknown, unknown> {
           dirty = true;
         }
       }
-      if (dirty) await this.ctx.storage.put("cells:" + sheetId, cells);
-    }
-    if (upserts.length || deletes.length) changed = true;
-
-    if (!changed) {
-      return { result: { status: conflicts.length ? "conflict" : "unchanged", revision: meta.revision, conflicts } };
+      if (dirty) editedCells.set(sheetId, cells);
     }
 
+    // Every cell of a replaced sheet moves past every version the sheet held, so a cell op based on
+    // the old layout -- a peer's edit sent before the replacement reached it -- conflicts instead
+    // of landing on whatever cell the replacement moved to its coordinate. The cell ops above were
+    // checked against the versions the replacement carried, since the sender queued them on top of
+    // it; the cells they wrote are bumped in place, so the upserts reported carry the new version.
+    // A collaborator's edit to a position the replacement emptied still lands; telling it from a
+    // new cell would take a version for every position, not just every cell.
+    for (const rep of replacements) {
+      let floor = rep.floor;
+      for (const cell of Object.values(rep.cells)) floor = Math.max(floor, cell.version);
+      for (const cell of Object.values(rep.cells)) cell.version = floor + 1;
+    }
+
+    // A client that sent a structure is told what the server holds, changed or not, since the
+    // server may have kept less than it sent (a sheet it would not restore, the last one it would
+    // not delete): the client diffs its next update against this.
+    const currentStructure = (): { structure?: Structure } =>
+      operation.structure ? { structure: { sheetOrder: meta.sheetOrder, sheets: meta.sheets, title: meta.title } } : {};
+    if (!nextStructure && !replacements.length && !upserts.length && !deletes.length) {
+      return { result: { status: conflicts.length ? "conflict" : "unchanged", revision: meta.revision, conflicts, ...currentStructure() } };
+    }
+
+    // --- Commit ------------------------------------------------------------
+    // In one transaction, so a write that fails leaves storage as it was.
+    const writes = new Map<string, CellMap>();
+    const removedSheets: string[] = [];
+    if (nextStructure) {
+      for (const id of nextStructure.sheetOrder) if (!meta.sheets[id]) writes.set(id, {});
+      for (const id of meta.sheetOrder) if (!nextStructure.sheets[id]) removedSheets.push(id);
+      Object.assign(meta, nextStructure);
+    }
+    for (const [id, cells] of editedCells) writes.set(id, cells);
+    for (const rep of replacements) writes.set(rep.id, rep.cells);
     meta.revision += 1;
     meta.lastModified = Date.now();
-    await this.ctx.storage.put("meta", meta);
+    await this.ctx.storage.transaction(async (txn) => {
+      for (const id of removedSheets) await txn.delete("cells:" + id);
+      for (const [id, cells] of writes) await txn.put("cells:" + id, cells);
+      await txn.put("meta", meta);
+    });
 
-    // sheetReplacements imply the caller already has the new cells locally, so
-    // we only rebroadcast the small per-cell diffs plus structure. Peers that
-    // received a replacement re-fetch via the accompanying snapshot flag.
+    // The structure goes out only when it changed, and a replaced sheet goes out whole (below),
+    // with the versions the server assigned.
     const event: OperationEvent = {
       type: "operation",
       senderId: operation.senderId,
       revision: meta.revision,
-      structure: { sheetOrder: meta.sheetOrder, sheets: meta.sheets, title: meta.title },
       upserts,
       deletes,
-      replacedSheets: (operation.sheetReplacements || []).map((r) => String(r.sheetId || "")),
+      replacedSheets: replacements.map((rep) => rep.id),
       lastModified: meta.lastModified,
     };
-    // For replaced sheets, include the full new cell maps so peers stay exact.
-    if (event.replacedSheets.length) {
-      event.replacedCells = {};
-      for (const id of event.replacedSheets) event.replacedCells[id] = await this.loadCells(id);
-    }
-    return { result: { status: conflicts.length ? "conflict" : "applied", ...event, conflicts }, event };
+    if (nextStructure) event.structure = { sheetOrder: meta.sheetOrder, sheets: meta.sheets, title: meta.title };
+    if (replacements.length) event.replacedCells = Object.fromEntries(replacements.map((rep) => [rep.id, rep.cells]));
+    return { result: { status: conflicts.length ? "conflict" : "applied", ...event, ...currentStructure(), conflicts }, event };
   }
 
   // --- Presence & subscription ------------------------------------------
@@ -299,11 +335,12 @@ function clampInt(v: unknown, lo: number, hi: number, dflt: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-function sanitizeDims(dims: unknown): Dims {
+// Sizes of the first `count` rows or columns.
+function sanitizeDims(dims: unknown, count: number): Dims {
   const out: Dims = {};
   if (dims && typeof dims === "object") {
     for (const [k, v] of Object.entries(dims as Record<string, unknown>)) {
-      if (!/^\d+$/.test(k)) continue;
+      if (!/^\d+$/.test(k) || Number(k) >= count) continue;
       const n = Math.round(Number(v));
       if (Number.isFinite(n) && n >= 8 && n <= 2000) out[k] = n;
     }
@@ -312,17 +349,51 @@ function sanitizeDims(dims: unknown): Dims {
 }
 
 function sheetMeta(s: Partial<SheetMeta> & Pick<SheetMeta, "id">): SheetMeta {
+  const rows = clampInt(s.rows, 1, 50000, DEFAULT_ROWS);
+  const cols = clampInt(s.cols, 1, 702, DEFAULT_COLS);
   return {
     id: String(s.id),
     name: String(s.name || "Sheet").slice(0, 60),
-    rows: clampInt(s.rows, 1, 50000, DEFAULT_ROWS),
-    cols: clampInt(s.cols, 1, 702, DEFAULT_COLS),
-    colWidths: sanitizeDims(s.colWidths),
-    rowHeights: sanitizeDims(s.rowHeights),
+    rows,
+    cols,
+    colWidths: sanitizeDims(s.colWidths, cols),
+    rowHeights: sanitizeDims(s.rowHeights, rows),
     frozenRows: clampInt(s.frozenRows, 0, 50, 0),
     frozenCols: clampInt(s.frozenCols, 0, 50, 0),
   };
 }
+
+// The sheets named by `order`, sanitized.
+function normalizeSheets(order: string[], sheets: Record<string, Partial<SheetMeta>>): Record<string, SheetMeta> {
+  const out: Record<string, SheetMeta> = {};
+  for (const id of order) out[id] = sheetMeta({ ...sheets[id], id });
+  return out;
+}
+
+// The sheet order after `update`. A sheet the client lists that the server lacks is kept only when
+// the update adds it, so a sheet a collaborator deleted is not brought back empty; one the server
+// holds that the client leaves out is kept unless the client removed it, so a sheet a collaborator
+// added meanwhile is not deleted. Those go last, as does an added sheet the order leaves out.
+function mergeSheetOrder(meta: DocumentMeta, update: StructureUpdate): string[] {
+  const ids = (list: unknown) => new Set(Array.isArray(list) ? list.map(String) : []);
+  const removed = ids(update.removedSheets), added = ids(update.addedSheets);
+  if (!Array.isArray(update.sheetOrder) && !removed.size && !added.size) return meta.sheetOrder;
+  const listed = Array.isArray(update.sheetOrder) ? update.sheetOrder.map(String) : meta.sheetOrder;
+  const order = [...new Set(listed)].filter((id) => !removed.has(id) && (meta.sheets[id] || added.has(id)));
+  for (const id of [...meta.sheetOrder, ...added]) if (!removed.has(id) && !order.includes(id)) order.push(id);
+  // The last sheet cannot be removed.
+  return order.length ? order : meta.sheetOrder;
+}
+
+// Whether `cells` holds exactly the cells `versions` lists, at those versions.
+function sameVersions(cells: CellMap, versions: Record<string, number>): boolean {
+  const refs = Object.keys(cells);
+  return refs.length === Object.keys(versions).length && refs.every((ref) => cells[ref].version === versions[ref]);
+}
+
+// The stored `meta` is one storage value, capped at 2 MB; a string costs up to two bytes per
+// character there. Every sheet's metadata lives in it, so this bounds how much a workbook holds.
+const MAX_META_CHARACTERS = 900000;
 
 const FMT_KEYS = new Set(["b", "i", "u", "s", "c", "bg", "a", "nf", "d", "fs", "wrap"]);
 function isFmtKey(k: string): k is keyof CellFmt { return FMT_KEYS.has(k); }
@@ -343,6 +414,7 @@ function sanitizeFmt(fmt: unknown): CellFmt | null {
   return Object.keys(out).length ? out : null;
 }
 
+const MAX_CELL_VERSION = 2 ** 40;
 function sanitizeCellMap(map: unknown): CellMap {
   const out: CellMap = {};
   if (!map || typeof map !== "object") return out;
@@ -352,7 +424,8 @@ function sanitizeCellMap(map: unknown): CellMap {
     out[ref] = {
       value: cell?.value == null ? "" : String(cell.value).slice(0, 8192),
       fmt: sanitizeFmt(cell?.fmt),
-      version: Math.max(1, Math.round(Number(cell?.version)) || 1),
+      // Bounded, so `version + 1` always moves on (a client sends versions in a replacement).
+      version: Math.min(MAX_CELL_VERSION, Math.max(1, Math.round(Number(cell?.version)) || 1)),
     };
   }
   return out;
