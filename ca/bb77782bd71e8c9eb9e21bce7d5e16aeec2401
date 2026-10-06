@@ -1,0 +1,31 @@
+packages/bundled-blueprints/blueprints/workspace-sheets/__tests__/xlsx.server.test.ts
+  s_c59a5934b3b141::t_5b2e15477845aa 1218-1264
+packages/bundled-blueprints/blueprints/workspace-sheets/files/README.md
+  s_c59a5934b3b141::t_fa0a1bbf11e1e5 141,145,165,167
+packages/bundled-blueprints/blueprints/workspace-sheets/files/client.ts
+  s_c59a5934b3b141::t_e260d0f3bfe8db 51,54,1692-1695,1697-1707,1717-1718,1720-1721,1729-1730,1739-1740,1744,1844-1852,2208,2219-2221,2291-2292,2294,2332,2341-2343,2410,5411,5414-5417,5435-5440,5456-5462,5574,5578
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/limits.ts
+  s_c59a5934b3b141::t_e01a3ee742f970 1-30
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/protocol.ts
+  s_c59a5934b3b141::t_b3bb33339e3d2d 4,108-109,140-143,147,170-172
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/xlsx.ts
+  s_c59a5934b3b141::t_b8d63389831c8c 2,737-738,777,782-783
+packages/bundled-blueprints/blueprints/workspace-sheets/files/server.ts
+  s_c59a5934b3b141::t_f2b603c2d91e16 10-11,13-41,161,178-180,237-248,271-272,283,357-358,388-401
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cabb77782bd71e8c9eb9e21bce7d5e16aeec2401",
+  "prompts": {},
+  "sessions": {
+    "s_c59a5934b3b141": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ef4731ff2ffeHd73LSoIc1KDAj",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
