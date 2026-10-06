@@ -1,0 +1,33 @@
+packages/bundled-blueprints/blueprints/workspace-sheets/__tests__/formula.test.ts
+  s_c59a5934b3b141::t_781609f0981106 3,13-19,22-34,37,74-84
+  s_c59a5934b3b141::t_a9760820b25122 20-21,35-36
+packages/bundled-blueprints/blueprints/workspace-sheets/files/README.md
+  s_c59a5934b3b141::t_58af76edca7882 232,255-256,259
+  s_c59a5934b3b141::t_3ddae2d4935fab 29
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/xlsx.ts
+  s_c59a5934b3b141::t_f9156a1606990f 575-611,618-623,626-643,649
+packages/bundled-blueprints/blueprints/workspace-sheets/files/client.ts
+  s_c59a5934b3b141::t_4d7d49a5e531a9 48,536,1558,1560-1564,1566
+  s_c59a5934b3b141::t_8cc91b841296c1 543-544
+packages/bundled-blueprints/blueprints/workspace-sheets/files/lib/formula.ts
+  s_c59a5934b3b141::t_8f25640d4fccb9 36-39,42,63,65-70,83-94,96-97,174-176
+  s_c59a5934b3b141::t_c9dce84026f000 95
+packages/bundled-blueprints/blueprints/workspace-sheets/__tests__/xlsx.server.test.ts
+  s_c59a5934b3b141::t_7e3ab8771508f1 636-666
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4b2fd1b01b66d1938ab5bfbef2db1d9312e00751",
+  "prompts": {},
+  "sessions": {
+    "s_c59a5934b3b141": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ef4731ff2ffeHd73LSoIc1KDAj",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Robert Fleming <rfleming@cloudflare.com>"
+    }
+  }
+}
