@@ -45,7 +45,7 @@ import type {
   StructureUpdate,
   SubscriberEvent,
 } from "./lib/protocol.ts";
-import { type Ast, CellError, ERR, isErr, parseFormula, serializeAst, unwrapParens } from "./lib/formula.ts";
+import { type Ast, CellError, ERR, isErr, parseFormula, serializeAst, unquoteSheetName, unwrapParens } from "./lib/formula.ts";
 
 // The bindings the Workshop's iframe bootstrap defines before this module runs: the RPC stub to
 // this gadget's Durable Object, and Cap'n Web's RpcTarget for the callbacks it is handed.
@@ -533,14 +533,15 @@ function makeEngine(model: Model): Engine {
   const astCache = new Map<string, Ast | CellError>(); // formula string -> ast|error
 
   function sheetByName(name: string): string | null {
-    name = name.replace(/^'|'$/g, "");
+    name = unquoteSheetName(name);
     for (const id of model.sheetOrder) if (model.sheets[id].name.toLowerCase() === name.toLowerCase()) return id;
     return null;
   }
   function splitRef(ref: string, defSheet: string): { sheetId: string; r: number; c: number } | null {
     let sheetId = defSheet;
     let cellPart = ref;
-    const bang = ref.indexOf("!");
+    // The last `!`: a quoted sheet name may hold one, a cell reference cannot.
+    const bang = ref.lastIndexOf("!");
     if (bang >= 0) {
       const sid = sheetByName(ref.slice(0, bang));
       if (!sid) return null;
@@ -1554,18 +1555,15 @@ function walkRefs(node: Ast | undefined, fn: (ref: string) => string | null): vo
     for (const key of ["a", "b"] as const) if (branches[key]) walkRefs(branches[key], fn); if (branches.args) branches.args.forEach((n) => walkRefs(n, fn));
   }
 }
+// Only current-sheet refs are adjusted; `$` locks are kept (Excel shifts absolute refs too).
 function adjustRef(ref: string, rowAt: number, rowDelta: number, colAt: number, colDelta: number): string | null {
-  const bang = ref.indexOf("!");
-  const sheetPrefix = bang >= 0 ? ref.slice(0, bang + 1) : "";
-  const body = bang >= 0 ? ref.slice(bang + 1) : ref;
-  if (bang >= 0) return null; // only adjust current-sheet refs for simplicity
-  const rc = parseRef(body);
-  if (!rc) return null;
-  let { r, c } = rc;
-  if (rowDelta) { if (r >= rowAt) r += rowDelta; }
-  if (colDelta) { if (c >= colAt) c += colDelta; }
+  const m = /^(\$?)([A-Za-z]+)(\$?)(\d+)$/.exec(ref);
+  if (!m) return null;
+  let r = Number(m[4]) - 1, c = letterToCol(m[2]);
+  if (rowDelta && r >= rowAt) r += rowDelta;
+  if (colDelta && c >= colAt) c += colDelta;
   if (r < 0 || c < 0) return "#REF!";
-  return sheetPrefix + rcToRef(r, c);
+  return m[1] + colToLetter(c) + m[3] + (r + 1);
 }
 
 function rewriteAllFormulas(rowAt: number, rowDelta: number, colAt: number, colDelta: number): void {

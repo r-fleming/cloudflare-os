@@ -572,53 +572,81 @@ function formulaFunctionAt(formula: string, offset: number): FormulaRewrite | nu
   return parenthesis > end ? {end: parenthesis, text: formula.slice(offset, end)} : null;
 }
 
-// Rewrites sheet and function names for Excel. Returns null when the formula is unbalanced
-// (unterminated string or quoted name, mismatched parentheses or brackets): the grid's parser
-// tolerates those, but one such `<f>` makes Excel report the whole workbook as damaged.
+// Mirrors the grid's tokenizer: inside a string a doubled quote is a literal quote. Emits the Excel form (double quotes, doubled inside) or null when unterminated.
+function stringLiteralAt(formula: string, offset: number): FormulaRewrite | null {
+  const quote = formula[offset];
+  let text = "";
+  for (let i = offset + 1; i < formula.length; ++i) {
+    const character = formula[i];
+    const escaped = character === quote && formula[i + 1] === quote;
+    if (escaped) {
+      text += quote;
+      ++i;
+    } else if (character === quote) {
+      return {end: i + 1, text: `"${text.replace(/"/g, '""')}"`};
+    } else {
+      text += character;
+    }
+  }
+  return null;
+}
+
+// The grid reads a single-quoted run as a sheet name only when its closing quote is followed by
+// `!`; any other run is a string literal. A run followed by `:` is also left alone here so an
+// Excel 3-D reference such as 'Jan':'Mar'!A1 survives verbatim (see isThreeDimensionalReference).
+function quotedSheetNameAt(formula: string, offset: number): boolean {
+  for (let i = offset + 1; i < formula.length; ++i) {
+    if (formula[i] !== "'") continue;
+    if (formula[i + 1] === "'") {
+      ++i;
+      continue;
+    }
+    return formula[i + 1] === "!" || formula[i + 1] === ":";
+  }
+  return false;
+}
+
+// Rewrites strings, sheet names and function names for Excel. Returns null when the formula is
+// unbalanced (unterminated string or quoted name, mismatched parentheses or brackets): the grid's
+// parser tolerates those, but one such `<f>` makes Excel report the whole workbook as damaged.
 function rewriteFormula(formula: string, names: Map<string, string>): string | null {
   const result: string[] = [];
-  let stringLiteral = false;
   let parentheses = 0;
   let structuredReferenceDepth = 0;
   for (let i = 0; i < formula.length;) {
     const character = formula[i];
-    if (character === '"') {
-      result.push(character);
-      if (stringLiteral && formula[i + 1] === '"') {
-        result.push(formula[i + 1]);
-        i += 2;
-        continue;
-      }
-      stringLiteral = !stringLiteral;
-      ++i;
+    if (character === '"' ||
+        (character === "'" && !structuredReferenceDepth && !quotedSheetNameAt(formula, i))) {
+      const literal = stringLiteralAt(formula, i);
+      if (!literal) return null;
+      result.push(literal.text);
+      i = literal.end;
       continue;
     }
-    if (!stringLiteral) {
-      let apostrophes = 0;
-      if (structuredReferenceDepth && (character === "[" || character === "]")) {
-        for (let j = i - 1; formula[j] === "'"; --j) ++apostrophes;
-      }
-      const escapedBracket = apostrophes % 2 === 1;
-      if (character === "[" && !escapedBracket) ++structuredReferenceDepth;
-      else if (character === "]" && !escapedBracket && --structuredReferenceDepth < 0) return null;
-      if (!structuredReferenceDepth) {
-        if (character === "(") ++parentheses;
-        else if (character === ")" && --parentheses < 0) return null;
-        const reference = character === "'"
-          ? quotedSheetReference(formula, i, names)
-          : formulaFunctionAt(formula, i) || unquotedSheetReference(formula, i, names);
-        if (character === "'" && !reference) return null;
-        if (reference) {
-          result.push(reference.text);
-          i = reference.end;
-          continue;
-        }
+    let apostrophes = 0;
+    if (structuredReferenceDepth && (character === "[" || character === "]")) {
+      for (let j = i - 1; formula[j] === "'"; --j) ++apostrophes;
+    }
+    const escapedBracket = apostrophes % 2 === 1;
+    if (character === "[" && !escapedBracket) ++structuredReferenceDepth;
+    else if (character === "]" && !escapedBracket && --structuredReferenceDepth < 0) return null;
+    if (!structuredReferenceDepth) {
+      if (character === "(") ++parentheses;
+      else if (character === ")" && --parentheses < 0) return null;
+      const reference = character === "'"
+        ? quotedSheetReference(formula, i, names)
+        : formulaFunctionAt(formula, i) || unquotedSheetReference(formula, i, names);
+      if (character === "'" && !reference) return null;
+      if (reference) {
+        result.push(reference.text);
+        i = reference.end;
+        continue;
       }
     }
     result.push(character);
     ++i;
   }
-  return stringLiteral || parentheses || structuredReferenceDepth ? null : result.join("");
+  return parentheses || structuredReferenceDepth ? null : result.join("");
 }
 
 function parsedCellValue(value: string, formulaNames: Map<string, string>): ParsedCellValue {
