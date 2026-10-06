@@ -1200,7 +1200,7 @@ interface PendingCellOp {
 }
 // Pending local ops keyed to flush together.
 const pendingCellOps = new Map<string, PendingCellOp>(); // "sheetId!REF" -> { sheetId, ref, value, fmt }
-let pendingStructure: StructureUpdate | null = null;      // latest structure snapshot to send
+let pendingStructure: Structure | null = null;      // latest structure snapshot to send
 const pendingReplacements = new Map<string, CellMap>(); // sheetId -> cells (full)
 // The revision the model held when the first pending structure snapshot or sheet replacement was
 // built; the payload may be replayed after a failure only against that revision (see
@@ -1209,8 +1209,25 @@ let wholesaleBaseRevision: number | null = null;
 // Set when a save was rejected, so the next attempt first asks the server where the document
 // stands (see sendPendingOperation): a rejection says nothing about whether the commit landed.
 let resyncBeforeSave = false;
-// Set when that check reloaded the sheet, so the status line says so once the save settles.
-let reloadedAfterFailure = false;
+// Set when the sheet was reloaded from the server, dropping changes of ours; the status line
+// says why once the save settles.
+let reloadNotice: string | null = null;
+// Each sheet's cell versions as this tab last saw them on the server, updated only from what the
+// server reports. A sheet replacement carries the copy it was built from, so the server can refuse
+// it when a collaborator has edited the sheet since.
+const serverVersions = new Map<string, Record<string, number>>();
+const pendingReplacementBases = new Map<string, Record<string, number>>();
+// Sheets a collaborator edited while a replacement of ours was pending: its base stays as it was,
+// so the server refuses it rather than overwriting their edit.
+const remotelyEditedSheets = new Set<string>();
+function noteServerCells(sheetId: string, cells: CellMap): void {
+  serverVersions.set(sheetId, Object.fromEntries(Object.entries(cells).map(([ref, cell]) => [ref, cell.version])));
+}
+function noteServerCell(sheetId: string, ref: string, version: number | null): void {
+  const versions = serverVersions.get(sheetId) || {};
+  if (version == null) delete versions[ref]; else versions[ref] = version;
+  serverVersions.set(sheetId, versions);
+}
 
 // `baseVersion` is the version the caller saw before it wrote the model: a deletion removes the
 // cell first, so the queue cannot read it back afterwards.
@@ -1218,16 +1235,25 @@ function queueCellOp(sheetId: string, ref: string, value: string | null, fmt: Ce
   pendingCellOps.set(sheetId + "!" + ref, { sheetId, ref, value, fmt, baseVersion });
   scheduleSave();
 }
+// The structure is queued as a whole-workbook snapshot but sent as the fields it changed relative
+// to `ackedStructure` (what the server last held, as far as this tab knows); the server keeps the
+// rest. A collaborator's structure arriving meanwhile is adopted and this tab's changes replayed
+// on top (applyStructure), so both survive; a structure sent and awaiting its response
+// (`inFlightStructure`) counts as local too.
+let ackedStructure: Structure | null = null;
+let inFlightStructure: Structure | null = null;
+// The cell ops of the save awaiting its response, which the server may already have applied.
+let inFlightCellOps = new Set<PendingCellOp>();
+function structureSnapshot(): Structure {
+  return { title: model.title, sheetOrder: model.sheetOrder.slice(), sheets: JSON.parse(JSON.stringify(model.sheets)) };
+}
 function queueStructure(): void {
   // Oldest wins: a later item cannot vouch for an earlier one.
   if (wholesaleBaseRevision === null) wholesaleBaseRevision = model.revision;
-  pendingStructure = {
-    title: model.title,
-    sheetOrder: model.sheetOrder.slice(),
-    sheets: JSON.parse(JSON.stringify(model.sheets)),
-  };
+  pendingStructure = structureSnapshot();
   scheduleSave();
 }
+// The server refuses the replacement if the sheet changed under it.
 function queueReplacement(sheetId: string): void {
   // The replacement is the sheet's whole cell map, local edits included, so a cell op still
   // queued for the sheet is redundant -- and, since the caller has just moved the sheet's cells
@@ -1237,7 +1263,11 @@ function queueReplacement(sheetId: string): void {
   // queued after the replacement, against the layout the replacement carries.
   dropCellOpsFor(sheetId);
   if (wholesaleBaseRevision === null) wholesaleBaseRevision = model.revision;
+  // A cell moved into an empty position has version 0 here; the server stores it as 1.
+  for (const cell of Object.values(model.cells[sheetId] || {})) if (cell.version < 1) cell.version = 1;
   pendingReplacements.set(sheetId, JSON.parse(JSON.stringify(model.cells[sheetId] || {})));
+  // The first pending replacement's base stands: a later one is built on top of it.
+  if (!pendingReplacementBases.has(sheetId)) pendingReplacementBases.set(sheetId, { ...serverVersions.get(sheetId) });
   scheduleSave();
 }
 function dropCellOpsFor(sheetId: string): void {
@@ -1250,11 +1280,11 @@ const saver = new SaveScheduler({
   save: sendPendingOperation,
   isDirty: () => pendingCellOps.size > 0 || pendingStructure !== null || pendingReplacements.size > 0,
   onStatus: (kind, message) => {
-    if (kind === "saved" && reloadedAfterFailure) {
+    if (kind === "saved" && reloadNotice) {
       // The save that followed a reload settled: say what happened before going back to "Saved".
-      reloadedAfterFailure = false;
-      saveStatus.set("synced", "Reloaded after a failed save");
-      setTimeout(() => { if (!saver.busy && !reloadedAfterFailure) saveStatus.set("saved", "Saved"); }, 1800);
+      saveStatus.set("synced", reloadNotice);
+      reloadNotice = null;
+      setTimeout(() => { if (!saver.busy && !reloadNotice) saveStatus.set("saved", "Saved"); }, 2400);
       return;
     }
     saveStatus.set(kind, message);
@@ -1296,38 +1326,43 @@ async function sendPendingOperation(): Promise<SaveOutcome> {
     // Rejecting here leaves the flag set; the scheduler counts a failure and tries again.
     const doc = await gadget.getDocument();
     resyncBeforeSave = false;
-    if (doc.revision !== wholesaleBaseRevision) {
-      pendingStructure = null;
-      wholesaleBaseRevision = null;
-      // A cell op queued after a replacement is keyed by the layout the replacement built, which
-      // the server may not have: if our commit landed, its snapshot already holds the cells the
-      // replacement carried but not an edit typed after it, which is lost here; if a peer's
-      // landed instead, the op would write into some other cell. Losing an edit after a failed
-      // save is a loss the user sees and can redo; writing the wrong cell is not. The undo
-      // history presumes that layout too. Cell ops on sheets with no replacement stay queued.
-      for (const sheetId of pendingReplacements.keys()) dropCellOpsFor(sheetId);
-      pendingReplacements.clear();
-      undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
-      applySnapshot(doc);
-      reloadedAfterFailure = true;
-    }
+    if (doc.revision !== wholesaleBaseRevision) discardWholesaleChanges(doc, "Reloaded after a failed save");
+  }
+  // A structure that changes nothing the server holds is not sent at all.
+  const structure = pendingStructure ? structurePatch(pendingStructure) : null;
+  if (pendingStructure && !structure) {
+    pendingStructure = null;
+    if (pendingReplacements.size === 0) wholesaleBaseRevision = null;
   }
   const sentCellOps = [...pendingCellOps];
-  const sentStructure = pendingStructure;
+  inFlightCellOps = new Set(sentCellOps.map(([, op]) => op));
+  const sentStructure = structure ? pendingStructure : null;
   const sentReplacements = [...pendingReplacements];
   if (!sentCellOps.length && !sentStructure && !sentReplacements.length) return "saved";
 
   const cellOps: CellOp[] = sentCellOps.map(([, op]) =>
     ({ sheetId: op.sheetId, ref: op.ref, value: op.value, fmt: op.fmt, baseVersion: op.baseVersion }));
-  const sheetReplacements = sentReplacements.map(([sheetId, cells]) => ({ sheetId, cells }));
+  const sheetReplacements = sentReplacements.map(([sheetId, cells]) => ({ sheetId, cells, baseVersions: pendingReplacementBases.get(sheetId) }));
   let result: OperationResult;
+  inFlightStructure = sentStructure;
   try {
-    result = await gadget.applyOperation({
-      senderId: clientId, structure: sentStructure, cellOps, sheetReplacements,
-    });
+    result = await gadget.applyOperation({ senderId: clientId, structure, cellOps, sheetReplacements });
   } catch (e) {
     resyncBeforeSave = true;
     throw e;
+  } finally {
+    inFlightStructure = null;
+    inFlightCellOps = new Set();
+  }
+
+  if (result.status === "rejected") {
+    // Nothing was written. A stale replacement means a collaborator edited the sheet first; a
+    // structure too large to store can never be saved. Either way the wholesale changes go, and
+    // the cell ops stay queued, as after a failed save.
+    discardWholesaleChanges(await gadget.getDocument(), result.reason === "too-large"
+      ? "Not saved: the workbook's sheet settings would exceed the storage limit"
+      : "Reloaded: a collaborator changed the sheet first");
+    return "saved";
   }
 
   // Only what this call carried leaves the queue: an edit made while it was in flight
@@ -1335,8 +1370,23 @@ async function sendPendingOperation(): Promise<SaveOutcome> {
   // for the scheduler's retry.
   for (const [key, op] of sentCellOps) if (pendingCellOps.get(key) === op) pendingCellOps.delete(key);
   if (pendingStructure === sentStructure) pendingStructure = null;
+  // The server stores a replaced sheet at new versions (see SheetReplacement). The model holds the
+  // cells sent plus whatever was typed since, queued as cell ops on top of them: both move to the
+  // server's versions. A newer replacement of the sheet still pending holds a layout the server
+  // has not seen, so then only the server's copy is noted.
   for (const [sheetId, cells] of sentReplacements) {
-    if (pendingReplacements.get(sheetId) === cells) pendingReplacements.delete(sheetId);
+    const stored = result.replacedCells?.[sheetId] ?? cells;
+    noteServerCells(sheetId, stored);
+    if (pendingReplacements.get(sheetId) !== cells) continue;
+    pendingReplacements.delete(sheetId);
+    pendingReplacementBases.delete(sheetId);
+    remotelyEditedSheets.delete(sheetId);
+    const modelCells = model.cells[sheetId] || {};
+    for (const [ref, cell] of Object.entries(stored)) {
+      if (modelCells[ref]) modelCells[ref].version = cell.version;
+      const pending = pendingCellOps.get(sheetId + "!" + ref);
+      if (pending) pending.baseVersion = cell.version;
+    }
   }
   if (pendingStructure === null && pendingReplacements.size === 0) wholesaleBaseRevision = null;
 
@@ -1344,32 +1394,80 @@ async function sendPendingOperation(): Promise<SaveOutcome> {
   // Adopt acknowledged versions. An edit typed while this call was in flight replaced its entry
   // and stays pending; it was made on top of what the call carried, and only our write could
   // have produced the version acknowledged here -- a peer's would have conflicted -- so it moves
-  // with the ack. A conflict rebases nothing: the server's cell stands, and a pending follow-up
-  // on it is rejected the same way.
+  // with the ack.
+  // On a sheet with a replacement still pending, the model holds that replacement's layout, in
+  // which the coordinate may name another cell: there the ack is only noted.
   for (const up of result.upserts || []) {
+    noteServerCell(up.sheetId, up.ref, up.cell.version);
+    if (pendingReplacements.has(up.sheetId)) continue;
     const cells = model.cells[up.sheetId] || (model.cells[up.sheetId] = {});
     cells[up.ref] = { ...up.cell };
     const pending = pendingCellOps.get(up.sheetId + "!" + up.ref);
     if (pending) pending.baseVersion = up.cell.version;
   }
   for (const del of result.deletes || []) {
+    noteServerCell(del.sheetId, del.ref, null);
+    if (pendingReplacements.has(del.sheetId)) continue;
     const cells = model.cells[del.sheetId]; if (cells) delete cells[del.ref];
     const pending = pendingCellOps.get(del.sheetId + "!" + del.ref);
     if (pending) pending.baseVersion = 0;
   }
+  // A replacement still pending was built on top of everything this call carried, so the server
+  // now holds its base -- unless a collaborator edited the sheet meanwhile.
+  for (const sheetId of pendingReplacementBases.keys()) {
+    if (!remotelyEditedSheets.has(sheetId)) pendingReplacementBases.set(sheetId, { ...serverVersions.get(sheetId) });
+  }
+  // Conflicts are noted only after that: a pending replacement was built without the
+  // collaborator's winning cell, so its base must not vouch for it.
   const conflicts = result.status === "conflict" && result.conflicts ? result.conflicts : [];
-  // Rebase on the server's version of every cell it rejected.
   for (const cf of conflicts) {
+    noteServerCell(cf.sheetId, cf.ref, cf.cell.version);
+    if (pendingReplacements.has(cf.sheetId)) continue;
+    // An edit to the cell typed after the rejected one is newer than the server's: it stays, and
+    // is re-sent on the version the server reported. Otherwise the server's cell stands.
+    const pending = pendingCellOps.get(cf.sheetId + "!" + cf.ref);
+    if (pending) { pending.baseVersion = cf.cell.version; continue; }
     const cells = model.cells[cf.sheetId] || (model.cells[cf.sheetId] = {});
     cells[cf.ref] = { ...cf.cell };
+  }
+  // The server's structure after our change, including anything it normalized or kept (a
+  // dimension clamped, a sheet it would not delete). With a newer local structure pending it only
+  // becomes the base that one is diffed against, so whatever the server lacks -- a
+  // collaborator's change that our save replaced, merged in while it was in flight -- is sent
+  // again.
+  if (result.structure && !pendingStructure) {
+    applyStructure(result.structure);
+    renderTabs();
+  } else if (result.structure || sentStructure) {
+    ackedStructure = result.structure ?? sentStructure;
   }
   rebuildEngine();
   // The optimistic render already shows a plain acknowledgement. A reload above replaced the
   // grid with the server's copy, which the acknowledged cells now supersede, and a conflict
   // replaces our cell with the server's; neither is shown otherwise, since our own broadcast is
   // ignored.
-  if (reloadedAfterFailure || conflicts.length) renderGrid();
+  if (reloadNotice || conflicts.length || result.structure) renderGrid();
   return conflicts.length ? "conflict" : "saved";
+}
+
+// Drops every pending structure change and sheet replacement and adopts the server's copy `doc`,
+// saying why on the status line once the next save settles.
+function discardWholesaleChanges(doc: SheetsDocument, notice: string): void {
+  pendingStructure = null;
+  wholesaleBaseRevision = null;
+  // A cell op queued after a replacement is keyed by the layout the replacement built, which
+  // the server may not have: if our commit landed, its snapshot already holds the cells the
+  // replacement carried but not an edit typed after it, which is lost here; if a peer's
+  // landed instead, the op would write into some other cell. Losing an edit after a failed
+  // save is a loss the user sees and can redo; writing the wrong cell is not. The undo
+  // history presumes that layout too. Cell ops on sheets with no replacement stay queued.
+  for (const sheetId of pendingReplacements.keys()) dropCellOpsFor(sheetId);
+  pendingReplacements.clear();
+  pendingReplacementBases.clear();
+  remotelyEditedSheets.clear();
+  undoStack.length = 0; redoStack.length = 0; updateUndoButtons();
+  applySnapshot(doc);
+  reloadNotice = notice;
 }
 
 // ===========================================================================
@@ -1424,6 +1522,15 @@ function applyHistory(entry: HistoryBatch, into: HistoryBatch[]): void {
 }
 function undo(): void { if (!undoStack.length) return; applyHistory(undoStack.pop()!, redoStack); }
 function redo(): void { if (!redoStack.length) return; applyHistory(redoStack.pop()!, undoStack); }
+// Drops every undo and redo step that touched `sheetId`, whose cells were moved under them.
+function forgetHistoryFor(sheetId: string): void {
+  const touches = (batch: HistoryBatch) => [...batch.cells.values()].some((record) => record.sheetId === sheetId);
+  for (const stack of [undoStack, redoStack]) {
+    const kept = stack.filter((batch) => !touches(batch));
+    stack.length = 0; stack.push(...kept);
+  }
+  updateUndoButtons();
+}
 function updateUndoButtons(): void { undoBtn.disabled = !undoStack.length; redoBtn.disabled = !redoStack.length; }
 
 // ===========================================================================
@@ -1968,12 +2075,12 @@ function refreshToolbarState(): void {
 // ===========================================================================
 // Cell editing
 // ===========================================================================
-let editing: { ref: string; r: number; c: number } | null = null; // { ref, r, c, initial }
+let editing: { ref: string; r: number; c: number; sheetId: string } | null = null;
 function startEdit(ref: string, replace = false, seed: string | null = null): void {
   const rc = parseRef(ref)!;
   const td = cellEl(rc.r, rc.c);
   if (!td) return;
-  editing = { ref, r: rc.r, c: rc.c };
+  editing = { ref, r: rc.r, c: rc.c, sheetId: activeSheetId };
   const cell = getCell(ref);
   let text = seed != null ? seed : (replace ? "" : (cell ? cell.value : ""));
   const rect = td.getBoundingClientRect();
@@ -2488,28 +2595,144 @@ window.addEventListener("pagehide", () => { gadget.leavePresence(clientId).catch
 // ===========================================================================
 function applyRemoteOperation(event: OperationEvent): void {
   if (!event || event.senderId === clientId) return;
+  let droppedEdits = false, replacedWhileEditing = false;
   applyingRemote = true;
   model.revision = Math.max(model.revision, event.revision || 0);
   if (event.structure) applyStructure(event.structure);
   for (const up of event.upserts || []) {
     const cells = model.cells[up.sheetId] || (model.cells[up.sheetId] = {});
     cells[up.ref] = { ...up.cell };
+    noteServerCell(up.sheetId, up.ref, up.cell.version);
+    if (pendingReplacementBases.has(up.sheetId)) remotelyEditedSheets.add(up.sheetId);
   }
-  for (const del of event.deletes || []) { const cells = model.cells[del.sheetId]; if (cells) delete cells[del.ref]; }
-  if (event.replacedCells) for (const [sid, cells] of Object.entries(event.replacedCells)) model.cells[sid] = cells;
+  for (const del of event.deletes || []) {
+    const cells = model.cells[del.sheetId]; if (cells) delete cells[del.ref];
+    noteServerCell(del.sheetId, del.ref, null);
+    if (pendingReplacementBases.has(del.sheetId)) remotelyEditedSheets.add(del.sheetId);
+  }
+  if (event.replacedCells) {
+    for (const [sid, cells] of Object.entries(event.replacedCells)) {
+      model.cells[sid] = cells;
+      noteServerCells(sid, cells);
+      if (pendingReplacementBases.has(sid)) remotelyEditedSheets.add(sid);
+      // The collaborator moved the sheet's cells, so an edit queued here, and the undo history,
+      // name coordinates that now hold other cells. The server would refuse such an edit where a
+      // cell now stands (every one is at a new version), but write it into an emptied position.
+      if ([...pendingCellOps.values()].some((op) => op.sheetId === sid && !inFlightCellOps.has(op))) droppedEdits = true;
+      dropCellOpsFor(sid);
+      forgetHistoryFor(sid);
+      if (editing?.sheetId === sid) { droppedEdits = true; replacedWhileEditing = true; }
+    }
+  }
   applyingRemote = false;
   rebuildEngine();
-  if (!model.sheets[activeSheetId]) activeSheetId = model.sheetOrder[0];
+  // The edit in progress names a coordinate that now holds another cell.
+  if (replacedWhileEditing) cancelEdit();
+  if (!model.sheets[activeSheetId]) {
+    // The sheet open here was deleted by a peer: an edit in progress belonged to it.
+    if (editing) cancelEdit();
+    activeSheetId = model.sheetOrder[0];
+  }
   renderTabs(); renderGrid();
-  saveStatus.set("synced", "Live update");
-  setTimeout(() => { if (!saver.busy && !pendingCellOps.size) saveStatus.set("saved", "Saved"); }, 900);
+  saveStatus.set("synced", droppedEdits ? "A collaborator rearranged the sheet; unsaved edits to it were dropped" : "Live update");
+  setTimeout(() => { if (!saver.busy && !pendingCellOps.size) saveStatus.set("saved", "Saved"); }, droppedEdits ? 2400 : 900);
 }
+// Remote structure replaces the model wholesale. Local changes that are still pending are diffed
+// against `ackedStructure` and replayed on top, per sheet field.
 function applyStructure(s: Structure): void {
+  // A structure awaiting its save response is local too: the server applies it after this remote
+  // one, so it must be replayed here as well (and re-saved merged, since the server will then
+  // hold only ours).
+  const localSource = pendingStructure || inFlightStructure;
+  const local = localSource ? localStructureChanges(localSource) : null;
   if (s.title != null && document.activeElement !== titleInput) { model.title = s.title; titleInput.value = s.title; }
   else if (s.title != null) model.title = s.title;
   model.sheetOrder = s.sheetOrder.slice();
   for (const id of model.sheetOrder) model.sheets[id] = { ...model.sheets[id], ...s.sheets[id] };
-  for (const id of Object.keys(model.sheets)) if (!model.sheetOrder.includes(id)) { delete model.sheets[id]; delete model.cells[id]; }
+  const added = new Set(local ? Object.keys(local.added) : []);
+  for (const id of Object.keys(model.sheets)) if (!model.sheetOrder.includes(id) && !added.has(id)) { delete model.sheets[id]; delete model.cells[id]; }
+  ackedStructure = {
+    title: model.title, sheetOrder: model.sheetOrder.slice(),
+    sheets: JSON.parse(JSON.stringify(Object.fromEntries(model.sheetOrder.map((id) => [id, model.sheets[id]])))),
+  };
+  if (!local || isEmptyChange(local)) {
+    pendingStructure = null;
+    if (pendingReplacements.size === 0) wholesaleBaseRevision = null;
+    return;
+  }
+  if (local.title != null) { model.title = local.title; if (document.activeElement !== titleInput) titleInput.value = local.title; }
+  for (const id of local.removed) {
+    const index = model.sheetOrder.indexOf(id);
+    // A collaborator deleted every other sheet meanwhile: this one stays, as the server keeps it.
+    if (index >= 0 && model.sheetOrder.length > 1) { model.sheetOrder.splice(index, 1); delete model.sheets[id]; delete model.cells[id]; }
+  }
+  for (const [id, sheet] of Object.entries(local.added)) {
+    model.sheets[id] = sheet;
+    if (!model.cells[id]) model.cells[id] = {};
+    if (!model.sheetOrder.includes(id)) model.sheetOrder.push(id);
+  }
+  for (const [id, fields] of Object.entries(local.changed)) {
+    // A sheet deleted remotely while edited here stays deleted.
+    if (!model.sheetOrder.includes(id)) continue;
+    Object.assign(model.sheets[id], fields);
+  }
+  if (local.sheetOrder) {
+    const order = local.sheetOrder.filter((id) => model.sheetOrder.includes(id));
+    model.sheetOrder = [...order, ...model.sheetOrder.filter((id) => !order.includes(id))];
+  }
+  if (wholesaleBaseRevision === null) wholesaleBaseRevision = model.revision;
+  pendingStructure = structureSnapshot();
+  scheduleSave();
+}
+// What a local structure snapshot changed relative to `ackedStructure`: `null` for what it left
+// alone. Built from a copy, so replaying it never shares objects with the snapshot.
+interface LocalStructureChanges {
+  title: string | null;
+  sheetOrder: string[] | null;
+  added: Record<string, SheetMeta>;
+  removed: string[];
+  changed: Record<string, Partial<SheetMeta>>;
+}
+function isEmptyChange(changes: LocalStructureChanges): boolean {
+  return changes.title == null && !changes.sheetOrder && !changes.removed.length &&
+    !Object.keys(changes.added).length && !Object.keys(changes.changed).length;
+}
+function copySheetField<K extends keyof SheetMeta>(to: Partial<SheetMeta>, from: SheetMeta, key: K): void { to[key] = from[key]; }
+function localStructureChanges(source: Structure): LocalStructureChanges {
+  const snapshot: Structure = JSON.parse(JSON.stringify(source));
+  const base: Structure = ackedStructure || { title: snapshot.title, sheetOrder: [], sheets: {} };
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const changes: LocalStructureChanges = {
+    title: snapshot.title !== base.title ? snapshot.title : null,
+    sheetOrder: same(snapshot.sheetOrder, base.sheetOrder) ? null : snapshot.sheetOrder,
+    added: {},
+    removed: base.sheetOrder.filter((id) => !snapshot.sheets[id]),
+    changed: {},
+  };
+  for (const [id, sheet] of Object.entries(snapshot.sheets)) {
+    const baseSheet = base.sheets[id];
+    if (!baseSheet) { changes.added[id] = sheet; continue; }
+    const fields: Partial<SheetMeta> = {};
+    const keys = new Set([...Object.keys(sheet), ...Object.keys(baseSheet)] as (keyof SheetMeta)[]);
+    for (const key of keys) if (!same(sheet[key], baseSheet[key])) copySheetField(fields, sheet, key);
+    if (Object.keys(fields).length) changes.changed[id] = fields;
+  }
+  return changes;
+}
+// The structure update to send for `snapshot`: only what differs from what the server holds, since
+// the server keeps every sheet and field an update leaves out. `null` when nothing differs.
+function structurePatch(snapshot: Structure): StructureUpdate | null {
+  const changes = localStructureChanges(snapshot);
+  if (isEmptyChange(changes)) return null;
+  const sheets: Record<string, Partial<SheetMeta>> = { ...changes.added, ...changes.changed };
+  const reordered = changes.sheetOrder || Object.keys(changes.added).length;
+  return {
+    ...(changes.title != null ? { title: changes.title } : {}),
+    ...(reordered ? { sheetOrder: snapshot.sheetOrder } : {}),
+    ...(Object.keys(changes.added).length ? { addedSheets: Object.keys(changes.added) } : {}),
+    ...(changes.removed.length ? { removedSheets: changes.removed } : {}),
+    sheets,
+  };
 }
 
 function applySnapshot(doc: SheetsDocument): void {
@@ -2520,8 +2743,11 @@ function applySnapshot(doc: SheetsDocument): void {
   model.sheets = doc.sheets || {};
   model.cells = doc.cells || {};
   for (const id of model.sheetOrder) if (!model.cells[id]) model.cells[id] = {};
+  serverVersions.clear();
+  for (const id of model.sheetOrder) noteServerCells(id, model.cells[id]);
+  ackedStructure = structureSnapshot();
   titleInput.value = model.title;
-  if (!activeSheetId || !model.sheets[activeSheetId]) activeSheetId = model.sheetOrder[0];
+  if (!activeSheetId || !model.sheets[activeSheetId]) { if (editing) cancelEdit(); activeSheetId = model.sheetOrder[0]; }
   applyingRemote = false;
   rebuildEngine();
   renderTabs(); renderGrid();

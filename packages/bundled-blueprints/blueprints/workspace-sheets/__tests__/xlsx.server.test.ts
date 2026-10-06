@@ -157,9 +157,10 @@ function registryOf(...stubs: object[]): Registry {
 }
 
 // A Gadget over in-memory storage, for exercising the mutation queue without a Durable Object.
-function inMemoryGadget(subscribers: Registry = registryOf()) {
+// `storedSheet` is the one sheet's metadata as stored, which may be in a shape the server no longer writes.
+function inMemoryGadget(subscribers: Registry = registryOf(), storedSheet: Record<string, unknown> = sheet("Sheet")) {
   const stored = new Map<string, unknown>([
-    ["meta", {revision: 0, title: "Test", sheetOrder: ["sheet"], sheets: {sheet: sheet("Sheet")}, lastModified: 0}],
+    ["meta", {revision: 0, title: "Test", sheetOrder: ["sheet"], sheets: {sheet: storedSheet}, lastModified: 0}],
     ["cells:sheet", {}],
   ]);
   return Object.assign(Object.create(Gadget.prototype), {
@@ -820,6 +821,171 @@ describe("Workspace Sheets document snapshots", () => {
     expect(callback.dup).not.toHaveBeenCalled();
     expect(fixture.subscribers.size).toBe(0);
     await expect(fixture.applyOperation(setCell("A1", "still works"))).resolves.toMatchObject({status: "applied"});
+  });
+  it("clamps chart and pivot ranges to their sheet and rejects ones clients could not walk", async () => {
+    const fixture = inMemoryGadget();
+    const pivot = {sourceSheetId: "sheet", rowField: "a", columnField: "", valueField: "b", aggregate: "sum"};
+    // Partial charts and pivots, as a client might send them: the server fills in the rest.
+    const structure = {
+      sheetOrder: ["pivot", "sheet", "orphan", "big"],
+      addedSheets: ["pivot", "orphan", "big"],
+      sheets: {
+        sheet: {...sheet("Sheet", {rows: 50, cols: 4}), charts: [
+          {id: "beyond", type: "line", range: "A1:XFD1048576"},
+          {id: "single", type: "line", range: "b2"},
+          {id: "outside", type: "line", range: "E60:F70"},
+        ]},
+        pivot: {...sheet("Pivot"), pivot: {...pivot, sourceRange: "A1:ZZ50000"}},
+        orphan: {...sheet("Orphan"), pivot: {...pivot, sourceSheetId: "missing", sourceRange: "A1:B2"}},
+        // Within the sheet, but 35 million cells: every client would hang walking it.
+        big: {...sheet("Big", {rows: 50000, cols: 702}), charts: [
+          {id: "huge", type: "line", range: "A1:ZZ50000"},
+          {id: "large", type: "line", range: "A1:D50000"},
+        ], pivot: {...pivot, sourceSheetId: "big", sourceRange: "A1:E50000"}},
+      },
+    } as never;
+    await fixture.applyOperation({senderId: "test", structure});
+    const document = await fixture.getDocument();
+    expect(document.sheets.sheet.charts?.map((chart) => chart.range)).toEqual(["A1:D50", "B2", ""]);
+    expect(document.sheets.big.charts?.map((chart) => chart.range)).toEqual(["", "A1:D50000"]);
+    expect(document.sheets.big.pivot?.sourceRange).toBe("");
+    expect(document.sheets.pivot.pivot?.sourceRange).toBe("A1:D50");
+    // Its source is gone, so there is nothing to bound it by; the client leaves the output alone.
+    expect(document.sheets.orphan.pivot?.sourceRange).toBe("A1:B2");
+  });
+
+  it("reads metadata saved in older shapes through the same sanitizers as a write", async () => {
+    const fixture = inMemoryGadget(registryOf(), {...sheet("Sheet"), filter: {range: "A1:B4"}, charts: [{type: "bar"}],
+      comments: {A1: "note"}, pivot: {source: "A1:B4", destination: "D1"}});
+    const document = await fixture.getDocument();
+    expect(document.sheets.sheet).toMatchObject({filter: null, charts: [], comments: [], pivot: null});
+  });
+
+  it("keeps metadata a structure update leaves out, and clears a filter or pivot sent as null", async () => {
+    const fixture = inMemoryGadget();
+    const filter = {row: 0, endRow: 3, columns: [0, 1], criteria: {0: ["s:a"]}, rowOrder: [], sort: null};
+    const comments = [{id: "c1", ref: "A1", text: "note", createdAt: 1, resolved: false}];
+    await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {filter, comments}}}} as never);
+    await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {name: "Renamed"}}}} as never);
+    let document = await fixture.getDocument();
+    expect(document.sheets.sheet).toMatchObject({name: "Renamed", filter, comments});
+
+    await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {filter: null, name: null}}}} as never);
+    document = await fixture.getDocument();
+    expect(document.sheets.sheet).toMatchObject({name: "Renamed", filter: null, comments});
+  });
+
+  it("does not commit or broadcast a structure that changes nothing, and omits structure from cell-only events", async () => {
+    const subscriber = stub({operation: vi.fn()});
+    const fixture = inMemoryGadget(registryOf(subscriber));
+    const current = await fixture.getDocument();
+    const same = await fixture.applyOperation({senderId: "test", structure: {title: current.title, sheetOrder: current.sheetOrder, sheets: current.sheets}});
+    expect(same.status).toBe("unchanged");
+    expect(subscriber.operation).not.toHaveBeenCalled();
+
+    const edit = await fixture.applyOperation(setCell("A1", "x"));
+    expect(edit.status).toBe("applied");
+    expect(edit).not.toHaveProperty("structure");
+    expect(subscriber.operation.mock.calls[0][0]).not.toHaveProperty("structure");
+  });
+
+  it("rejects a structure too large to store, writing nothing the operation carried", async () => {
+    const fixture = inMemoryGadget();
+    const comments = Array.from({length: 300}, (_, index) => ({id: "c" + index, ref: "A1", text: "あ".repeat(4000), createdAt: 1, resolved: false}));
+    const result = await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {comments}}},
+      cellOps: [{sheetId: "sheet", ref: "A1", value: "edit", fmt: null, baseVersion: 0}]} as never);
+    expect(result).toMatchObject({status: "rejected", reason: "too-large", revision: 0});
+    const document = await fixture.getDocument();
+    expect(document.sheets.sheet.comments).toEqual([]);
+    expect(document.cells.sheet).toEqual({});
+  });
+
+  it("rejects a sheet replacement built on cells that have changed since", async () => {
+    const fixture = inMemoryGadget();
+    await fixture.applyOperation(setCell("A1", "first"));
+    const replacement = {sheetId: "sheet", cells: {A2: cell("moved")}, baseVersions: {A1: 1}};
+    await fixture.applyOperation(setCell("A1", "peer edit", 1));
+
+    const stale = await fixture.applyOperation({senderId: "test", sheetReplacements: [replacement]} as never);
+    expect(stale).toMatchObject({status: "rejected", reason: "stale"});
+    expect((await fixture.getDocument()).cells.sheet.A1.value).toBe("peer edit");
+
+    const current = await fixture.applyOperation({senderId: "test", sheetReplacements: [{...replacement, baseVersions: {A1: 2}}]} as never);
+    expect(current.status).toBe("applied");
+    expect(Object.keys((await fixture.getDocument()).cells.sheet)).toEqual(["A2"]);
+  });
+
+  it("moves a replaced sheet past every version it held, so an edit to the old layout conflicts", async () => {
+    const fixture = inMemoryGadget();
+    await fixture.applyOperation(setCell("A1", "one"));
+    await fixture.applyOperation(setCell("A1", "two", 1));
+    // A sort moving A1 to A2, with an edit typed on top of it in the same save.
+    const sorted = await fixture.applyOperation({senderId: "test",
+      sheetReplacements: [{sheetId: "sheet", cells: {A2: {value: "two", fmt: null, version: 1}, B2: cell("b")}, baseVersions: {A1: 2}}],
+      cellOps: [{sheetId: "sheet", ref: "B2", value: "typed", fmt: null, baseVersion: 1}]} as never);
+    expect(sorted.status).toBe("applied");
+    expect(sorted.replacedCells?.sheet).toEqual({A2: {value: "two", fmt: null, version: 3}, B2: {value: "typed", fmt: null, version: 3}});
+    expect(sorted.upserts).toEqual([{sheetId: "sheet", ref: "B2", cell: {value: "typed", fmt: null, version: 3}}]);
+    expect((await fixture.getDocument()).cells.sheet).toEqual(sorted.replacedCells?.sheet);
+
+    // A collaborator's edit sent before the sort reached it.
+    const stale = await fixture.applyOperation(setCell("A2", "peer", 1));
+    expect(stale).toMatchObject({status: "conflict", conflicts: [{sheetId: "sheet", ref: "A2", cell: {value: "two", version: 3}}]});
+  });
+
+  it("removes only the sheets an update lists as removed, and does not restore one deleted meanwhile", async () => {
+    const fixture = inMemoryGadget();
+    const order = async () => (await fixture.getDocument()).sheetOrder;
+    await fixture.applyOperation({senderId: "a", structure: {sheetOrder: ["sheet", "second"], addedSheets: ["second"], sheets: {second: sheet("Second")}}} as never);
+    // A tab that has not seen "second" adds "third".
+    await fixture.applyOperation({senderId: "b", structure: {sheetOrder: ["third", "sheet"], addedSheets: ["third"], sheets: {third: sheet("Third")}}} as never);
+    expect(await order()).toEqual(["third", "sheet", "second"]);
+
+    await fixture.applyOperation({senderId: "a", structure: {removedSheets: ["second"]}} as never);
+    expect(await order()).toEqual(["third", "sheet"]);
+    expect((await fixture.getDocument()).cells).not.toHaveProperty("second");
+
+    // A tab that still lists "second", reordering and renaming it, does not bring it back.
+    await fixture.applyOperation({senderId: "b", structure: {sheetOrder: ["sheet", "second", "third"], sheets: {second: {name: "Renamed"}}}} as never);
+    expect(await order()).toEqual(["sheet", "third"]);
+    // Nor can every sheet be removed; the sender is told what the server kept.
+    const result = await fixture.applyOperation({senderId: "b", structure: {removedSheets: ["sheet", "third"]}} as never);
+    expect(result).toMatchObject({status: "unchanged", structure: {sheetOrder: ["sheet", "third"]}});
+    expect(await order()).toEqual(["sheet", "third"]);
+  });
+
+  it("lets an edit shrink metadata that is already over the storage limit", async () => {
+    const comments = Array.from({length: 300}, (_, index) => ({id: "c" + index, ref: "A1", text: "あ".repeat(4000), createdAt: 1, resolved: false}));
+    const fixture = inMemoryGadget(registryOf(), sheet("Sheet", {comments}));
+    const smaller = await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {comments: comments.slice(1)}}}} as never);
+    expect(smaller.status).toBe("applied");
+    const larger = await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {comments}}}} as never);
+    expect(larger).toMatchObject({status: "rejected", reason: "too-large"});
+  });
+
+  it("keeps a filter's pre-sort order only when it orders exactly the body rows", async () => {
+    const fixture = inMemoryGadget();
+    const filter = (rowOrder: number[]) => ({row: 0, endRow: 3, columns: [0], criteria: {}, rowOrder, sort: {column: 0, direction: "asc"}});
+    for (const [rowOrder, kept] of [[[3, 1, 2], [3, 1, 2]], [[1, 1, 2], []], [[1, 2, 90], []], [[0, 1, 2], []]] as const) {
+      await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {filter: filter([...rowOrder])}}}} as never);
+      expect((await fixture.getDocument()).sheets.sheet.filter?.rowOrder).toEqual(kept);
+    }
+    // A filter left with no column on the sheet is dropped.
+    await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {filter: {...filter([]), columns: [500], sort: null}}}}} as never);
+    expect((await fixture.getDocument()).sheets.sheet.filter).toBeNull();
+  });
+
+  it("drops comments on invalid cells and repeated chart or comment ids", async () => {
+    const fixture = inMemoryGadget();
+    const comment = (id: string, ref: string) => ({id, ref, text: "note", createdAt: 1, resolved: false});
+    const chart = (id: string) => ({id, type: "pie", range: "A1:B2"});
+    await fixture.applyOperation({senderId: "test", structure: {sheets: {sheet: {
+      comments: [comment("a", "A1"), comment("b", "not a cell"), comment("a", "B2")],
+      charts: [chart("x"), chart("x"), chart("y")],
+    }}}} as never);
+    const document = await fixture.getDocument();
+    expect(document.sheets.sheet.comments?.map((each) => [each.id, each.ref])).toEqual([["a", "A1"]]);
+    expect(document.sheets.sheet.charts?.map((each) => each.id)).toEqual(["x", "y"]);
   });
 });
 

@@ -37,7 +37,77 @@ export type CellMap = Record<string, Cell>;
 /** Column widths or row heights in pixels, keyed by zero-based index (as a string). */
 export type Dims = Record<string, number>;
 
-/** A sheet's structure: identity, name, size and sizing metadata. */
+/**
+ * A sheet's data filter. `row` is the header row and `endRow` the table's last row; `columns` are
+ * the table's zero-based columns. `criteria` maps a column (as a string) to the filter tokens
+ * whose rows stay visible (see the client's `filterToken`). `rowOrder` is the table's body rows in
+ * their natural order before the current filter sort, so the sort can be cleared, and empty when
+ * there is no sort; `sort` is the column the filter menu sorted by, if any.
+ */
+export interface SheetFilter {
+  row: number;
+  endRow: number;
+  columns: number[];
+  criteria: Record<string, string[]>;
+  rowOrder: number[];
+  sort: { column: number; direction: "asc" | "desc" } | null;
+}
+
+/** The chart kinds the grid draws and the XLSX export writes. */
+export type ChartType = "line" | "pie" | "area" | "stackedBar";
+
+/** A chart floating over a sheet: the A1 range it plots, how, and where it sits in grid pixels. */
+export interface SheetChart {
+  id: string;
+  type: ChartType;
+  range: string;
+  title: string;
+  xAxisTitle: string;
+  yAxisTitle: string;
+  legend: boolean;
+  firstRowHeaders: boolean;
+  firstColLabels: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** A note on one cell; `createdAt` is epoch milliseconds. */
+export interface SheetComment {
+  id: string;
+  ref: string;
+  text: string;
+  createdAt: number;
+  resolved: boolean;
+}
+
+/** How a pivot table combines the values falling in one row/column group. */
+export type PivotAggregate = "sum" | "count" | "average" | "min" | "max";
+
+/**
+ * A pivot table: the sheet holding it is generated from `sourceRange` on `sourceSheetId`, whose
+ * first row names the fields. Fields are header texts (`""` for none); `filterValues` are the
+ * `filterField` values whose rows are included (all rows when empty).
+ */
+export interface PivotConfig {
+  sourceSheetId: string;
+  sourceRange: string;
+  rowField: string;
+  columnField: string;
+  valueField: string;
+  aggregate: PivotAggregate;
+  showRowTotals: boolean;
+  showColumnTotals: boolean;
+  filterField: string;
+  filterValues: string[];
+}
+
+/**
+ * A sheet's structure: identity, name, size and sizing metadata, plus the filter, charts,
+ * comments and pivot definition stored with it. Those four are optional in what a client sends;
+ * the server fills them in on every read and write.
+ */
 export interface SheetMeta {
   id: string;
   name: string;
@@ -47,6 +117,10 @@ export interface SheetMeta {
   rowHeights: Dims;
   frozenRows: number;
   frozenCols: number;
+  filter?: SheetFilter | null;
+  charts?: SheetChart[];
+  comments?: SheetComment[];
+  pivot?: PivotConfig | null;
 }
 
 /** The `meta` record the server stores: everything about the workbook except the cells. */
@@ -63,10 +137,17 @@ export interface SheetsDocument extends DocumentMeta {
   cells: Record<string, CellMap>;
 }
 
-/** The workbook structure as a client sends it: last-writer-wins, applied wholesale; anything omitted keeps its stored value. */
+/**
+ * The structure changes a client sends; anything omitted keeps its stored value. A sheet is
+ * created only by listing it in `addedSheets`, and removed only by listing it in `removedSheets`:
+ * one `sheetOrder` leaves out is kept, at the end, and one it lists that the server lacks is not
+ * created.
+ */
 export interface StructureUpdate {
   title?: string;
   sheetOrder?: string[];
+  addedSheets?: string[];
+  removedSheets?: string[];
   sheets?: Record<string, Partial<SheetMeta>>;
 }
 
@@ -86,10 +167,17 @@ export interface CellOp {
   baseVersion: number;
 }
 
-/** A whole-sheet cell replacement, used for sort, insert/delete and other operations that move many cells at once. */
+/**
+ * A whole-sheet cell replacement, used for sort, insert/delete and other operations that move many
+ * cells at once. `baseVersions` is every cell's version in the copy the replacement was built
+ * from; when present, the server rejects the operation if the sheet has changed since. The server
+ * stores every replaced cell at one version above any the sheet held, and reports the result in
+ * `replacedCells`.
+ */
 export interface SheetReplacement {
   sheetId: string;
   cells: CellMap;
+  baseVersions?: Record<string, number>;
 }
 
 /** What a client sends to `applyOperation`: any combination of a structure snapshot, sheet replacements and per-cell edits. */
@@ -120,18 +208,23 @@ export interface CellConflict {
   cell: Cell;
 }
 
-/** The first thing a client reads in a reply: `applied` if anything changed, `conflict` if anything was rejected, else `unchanged`. */
-export type OperationStatus = "applied" | "conflict" | "unchanged";
+/**
+ * The first thing a client reads in a reply: `applied` if anything changed, `conflict` if a cell
+ * edit was rejected, `rejected` if the whole operation was refused and nothing was written (see
+ * `reason`), else `unchanged`.
+ */
+export type OperationStatus = "applied" | "conflict" | "rejected" | "unchanged";
 
 /**
  * A committed operation as the server broadcasts it to every subscriber: the new revision, the
- * structure after it, the per-cell diffs, and for each replaced sheet its full new cell map.
+ * structure after it when the operation changed it, the per-cell diffs, and for each replaced
+ * sheet its full new cell map.
  */
 export interface OperationEvent {
   type: "operation";
   senderId: string | undefined;
   revision: number;
-  structure: Structure;
+  structure?: Structure;
   upserts: CellUpsert[];
   deletes: CellDeletion[];
   replacedSheets: string[];
@@ -148,11 +241,16 @@ export interface SnapshotEvent {
 /** What the server delivers to a subscriber's `operation` callback. */
 export type SubscriberEvent = OperationEvent | SnapshotEvent;
 
-/** What `applyOperation` returns: the status and rejected cells, plus the committed event's fields when anything changed. */
+/**
+ * What `applyOperation` returns: the status and rejected cells, plus the committed event's fields
+ * when anything changed. `structure` is present whenever the operation carried one, changed or
+ * not: what the server now holds.
+ */
 export interface OperationResult extends Partial<OperationEvent> {
   status: OperationStatus;
   revision: number;
   conflicts: CellConflict[];
+  reason?: "stale" | "too-large";
 }
 
 /** How a subscriber introduces itself: the id its events carry, and how to draw it. */

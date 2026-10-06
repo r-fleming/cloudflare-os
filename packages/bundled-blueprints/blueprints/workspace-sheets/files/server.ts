@@ -1,6 +1,16 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { MutationQueue, SubscriberRegistry } from "@gadgets/bundled-blueprints/libraries/sync/server";
 import { workbookToXlsx } from "./lib/xlsx.ts";
+import {
+  CHART_BOUNDS,
+  CHART_TYPES,
+  MAX_CHARTS_PER_SHEET,
+  MAX_COMMENT_LENGTH,
+  MAX_RANGE_CELLS,
+  MAX_SHEET_COLS,
+  MAX_SHEET_ROWS,
+  PIVOT_AGGREGATES,
+} from "./lib/limits.ts";
 import type {
   Cell,
   CellConflict,
@@ -9,6 +19,7 @@ import type {
   CellMap,
   CellOp,
   CellUpsert,
+  ChartType,
   CollaboratorInfo,
   Dims,
   DocumentMeta,
@@ -16,10 +27,17 @@ import type {
   Operation,
   OperationEvent,
   OperationResult,
+  PivotAggregate,
+  PivotConfig,
   PresenceUpdate,
+  SheetChart,
+  SheetComment,
+  SheetFilter,
   SheetMeta,
   SheetsDocument,
   SheetsPresenceEvent,
+  Structure,
+  StructureUpdate,
   SubscriberCallbacks,
 } from "./lib/protocol.ts";
 
@@ -91,7 +109,11 @@ export class Gadget extends DurableObject<unknown, unknown> {
       };
       await this.ctx.storage.put("meta", meta);
       await this.ctx.storage.put("cells:" + id, {});
+      return meta;
     }
+    // A workbook saved by an older version may hold metadata in shapes this one does not draw, so
+    // every read goes through the same sanitizers as a write.
+    meta.sheets = normalizeSheets(meta.sheetOrder, meta.sheets);
     return meta;
   }
 
@@ -125,51 +147,52 @@ export class Gadget extends DurableObject<unknown, unknown> {
     return result;
   }
 
+  // Everything is checked before anything is written, so a rejected operation leaves storage as
+  // it was.
   async applyOperationLocked(operation: Operation): Promise<LockedOutcome> {
     const meta = await this.loadMeta();
-    let changed = false;
+    const rejected = (reason: OperationResult["reason"]): LockedOutcome =>
+      ({ result: { status: "rejected", revision: meta.revision, conflicts: [], reason } });
 
     // --- Structure (last-writer-wins) ------------------------------------
+    let nextStructure: Structure | null = null;
     if (operation.structure) {
       const s = operation.structure;
-      const order = Array.isArray(s.sheetOrder) ? s.sheetOrder.map(String) : meta.sheetOrder;
-      const nextSheets: Record<string, SheetMeta> = {};
+      const order = mergeSheetOrder(meta, s);
+      const merged: Record<string, Partial<SheetMeta>> = {};
       for (const id of order) {
         const incoming: Partial<SheetMeta> = s.sheets?.[id] || {};
         const existing: Partial<SheetMeta> = meta.sheets[id] || {};
-        nextSheets[id] = sheetMeta({
-          id,
-          name: incoming.name ?? existing.name ?? "Sheet",
-          rows: incoming.rows ?? existing.rows,
-          cols: incoming.cols ?? existing.cols,
-          colWidths: incoming.colWidths ?? existing.colWidths,
-          rowHeights: incoming.rowHeights ?? existing.rowHeights,
-          frozenRows: incoming.frozenRows ?? existing.frozenRows,
-          frozenCols: incoming.frozenCols ?? existing.frozenCols,
-        });
-        if (!(await this.ctx.storage.get("cells:" + id))) {
-          await this.ctx.storage.put("cells:" + id, {});
+        // A key the client left out keeps the stored value. Only the filter and the pivot can be
+        // removed, by sending `null`.
+        const sheet: Record<string, unknown> = { ...existing, id };
+        for (const [key, value] of Object.entries(incoming)) {
+          if (key !== "id" && value !== undefined && (value !== null || key === "filter" || key === "pivot")) sheet[key] = value;
         }
+        merged[id] = sheet;
       }
-      // Drop cells for removed sheets.
-      for (const id of meta.sheetOrder) {
-        if (!nextSheets[id]) await this.ctx.storage.delete("cells:" + id);
+      const nextSheets = normalizeSheets(order, merged);
+      const title = typeof s.title === "string" ? s.title.slice(0, 200) || DEFAULT_TITLE : meta.title;
+      const structureChanged = title !== meta.title || JSON.stringify([order, nextSheets]) !== JSON.stringify([meta.sheetOrder, meta.sheets]);
+      if (structureChanged) {
+        // An edit that shrinks an oversized meta (deleting a chart) is let through.
+        const length = JSON.stringify({ ...meta, sheetOrder: order, sheets: nextSheets, title }).length;
+        if (length > MAX_META_CHARACTERS && length > JSON.stringify(meta).length) return rejected("too-large");
+        nextStructure = { sheetOrder: order, sheets: nextSheets, title };
       }
-      meta.sheetOrder = order;
-      meta.sheets = nextSheets;
-      if (typeof s.title === "string") meta.title = s.title.slice(0, 200) || DEFAULT_TITLE;
-      changed = true;
     }
+    const sheets = nextStructure?.sheets ?? meta.sheets;
 
-    // Whole-sheet cell replacement (used by sort / clear / insert-delete).
-    if (Array.isArray(operation.sheetReplacements)) {
-      for (const rep of operation.sheetReplacements) {
-        const id = String(rep.sheetId || "");
-        if (!meta.sheets[id]) continue;
-        const cells = sanitizeCellMap(rep.cells);
-        await this.ctx.storage.put("cells:" + id, cells);
-        changed = true;
-      }
+    // --- Whole-sheet cell replacement (sort, clear, insert/delete) ------
+    const replacements: { id: string; cells: CellMap; floor: number }[] = [];
+    for (const rep of operation.sheetReplacements || []) {
+      const id = String(rep.sheetId || "");
+      if (!sheets[id]) continue;
+      const stored = await this.loadCells(id);
+      if (rep.baseVersions && !sameVersions(stored, rep.baseVersions)) return rejected("stale");
+      let floor = 0;
+      for (const cell of Object.values(stored)) floor = Math.max(floor, cell.version);
+      replacements.push({ id, cells: sanitizeCellMap(rep.cells), floor });
     }
 
     // --- Per-cell operations (optimistic concurrency) --------------------
@@ -182,9 +205,10 @@ export class Gadget extends DurableObject<unknown, unknown> {
       if (!bySheet.has(sid)) bySheet.set(sid, []);
       bySheet.get(sid)!.push(op);
     }
+    const editedCells = new Map<string, CellMap>();
     for (const [sheetId, ops] of bySheet) {
-      if (!meta.sheets[sheetId]) continue;
-      const cells = await this.loadCells(sheetId);
+      if (!sheets[sheetId]) continue;
+      const cells = replacements.find((rep) => rep.id === sheetId)?.cells ?? await this.loadCells(sheetId);
       let dirty = false;
       for (const op of ops) {
         const ref = String(op.ref || "");
@@ -210,37 +234,63 @@ export class Gadget extends DurableObject<unknown, unknown> {
           dirty = true;
         }
       }
-      if (dirty) await this.ctx.storage.put("cells:" + sheetId, cells);
-    }
-    if (upserts.length || deletes.length) changed = true;
-
-    if (!changed) {
-      return { result: { status: conflicts.length ? "conflict" : "unchanged", revision: meta.revision, conflicts } };
+      if (dirty) editedCells.set(sheetId, cells);
     }
 
+    // Every cell of a replaced sheet moves past every version the sheet held, so a cell op based on
+    // the old layout -- a peer's edit sent before the replacement reached it -- conflicts instead
+    // of landing on whatever cell the replacement moved to its coordinate. The cell ops above were
+    // checked against the versions the replacement carried, since the sender queued them on top of
+    // it; the cells they wrote are bumped in place, so the upserts reported carry the new version.
+    // A collaborator's edit to a position the replacement emptied still lands; telling it from a
+    // new cell would take a version for every position, not just every cell.
+    for (const rep of replacements) {
+      let floor = rep.floor;
+      for (const cell of Object.values(rep.cells)) floor = Math.max(floor, cell.version);
+      for (const cell of Object.values(rep.cells)) cell.version = floor + 1;
+    }
+
+    // A client that sent a structure is told what the server holds, changed or not, since the
+    // server may have kept less than it sent (a sheet it would not restore, the last one it would
+    // not delete): the client diffs its next update against this.
+    const currentStructure = (): { structure?: Structure } =>
+      operation.structure ? { structure: { sheetOrder: meta.sheetOrder, sheets: meta.sheets, title: meta.title } } : {};
+    if (!nextStructure && !replacements.length && !upserts.length && !deletes.length) {
+      return { result: { status: conflicts.length ? "conflict" : "unchanged", revision: meta.revision, conflicts, ...currentStructure() } };
+    }
+
+    // --- Commit ------------------------------------------------------------
+    if (nextStructure) {
+      for (const id of nextStructure.sheetOrder) {
+        if (!(await this.ctx.storage.get("cells:" + id))) await this.ctx.storage.put("cells:" + id, {});
+      }
+      for (const id of meta.sheetOrder) {
+        if (!nextStructure.sheets[id]) await this.ctx.storage.delete("cells:" + id);
+      }
+      Object.assign(meta, nextStructure);
+    }
+    for (const rep of replacements) await this.ctx.storage.put("cells:" + rep.id, rep.cells);
+    for (const [id, cells] of editedCells) {
+      if (!replacements.some((rep) => rep.id === id)) await this.ctx.storage.put("cells:" + id, cells);
+    }
     meta.revision += 1;
     meta.lastModified = Date.now();
     await this.ctx.storage.put("meta", meta);
 
-    // sheetReplacements imply the caller already has the new cells locally, so
-    // we only rebroadcast the small per-cell diffs plus structure. Peers that
-    // received a replacement re-fetch via the accompanying snapshot flag.
+    // The structure goes out only when it changed, and a replaced sheet goes out whole (below),
+    // with the versions the server assigned.
     const event: OperationEvent = {
       type: "operation",
       senderId: operation.senderId,
       revision: meta.revision,
-      structure: { sheetOrder: meta.sheetOrder, sheets: meta.sheets, title: meta.title },
       upserts,
       deletes,
-      replacedSheets: (operation.sheetReplacements || []).map((r) => String(r.sheetId || "")),
+      replacedSheets: replacements.map((rep) => rep.id),
       lastModified: meta.lastModified,
     };
-    // For replaced sheets, include the full new cell maps so peers stay exact.
-    if (event.replacedSheets.length) {
-      event.replacedCells = {};
-      for (const id of event.replacedSheets) event.replacedCells[id] = await this.loadCells(id);
-    }
-    return { result: { status: conflicts.length ? "conflict" : "applied", ...event, conflicts }, event };
+    if (nextStructure) event.structure = { sheetOrder: meta.sheetOrder, sheets: meta.sheets, title: meta.title };
+    if (replacements.length) event.replacedCells = Object.fromEntries(replacements.map((rep) => [rep.id, rep.cells]));
+    return { result: { status: conflicts.length ? "conflict" : "applied", ...event, ...currentStructure(), conflicts }, event };
   }
 
   // --- Presence & subscription ------------------------------------------
@@ -312,16 +362,182 @@ function sanitizeDims(dims: unknown): Dims {
 }
 
 function sheetMeta(s: Partial<SheetMeta> & Pick<SheetMeta, "id">): SheetMeta {
+  // The filter and chart ranges are bounded by the sheet, so its size comes first.
+  const rows = clampInt(s.rows, 1, MAX_SHEET_ROWS, DEFAULT_ROWS);
+  const cols = clampInt(s.cols, 1, MAX_SHEET_COLS, DEFAULT_COLS);
   return {
     id: String(s.id),
     name: String(s.name || "Sheet").slice(0, 60),
-    rows: clampInt(s.rows, 1, 50000, DEFAULT_ROWS),
-    cols: clampInt(s.cols, 1, 702, DEFAULT_COLS),
+    rows,
+    cols,
     colWidths: sanitizeDims(s.colWidths),
     rowHeights: sanitizeDims(s.rowHeights),
     frozenRows: clampInt(s.frozenRows, 0, 50, 0),
     frozenCols: clampInt(s.frozenCols, 0, 50, 0),
+    filter: sanitizeFilter(s.filter, rows, cols),
+    charts: sanitizeCharts(s.charts, rows, cols),
+    comments: sanitizeComments(s.comments),
+    pivot: sanitizePivot(s.pivot),
   };
+}
+
+// The sheets named by `order`, sanitized. A pivot's range is bounded by its source sheet, which
+// may come later in the order, so that happens once every sheet's size is known; a pivot whose
+// source is gone keeps its range, and the client leaves its output alone.
+function normalizeSheets(order: string[], sheets: Record<string, Partial<SheetMeta>>): Record<string, SheetMeta> {
+  const out: Record<string, SheetMeta> = {};
+  for (const id of order) out[id] = sheetMeta({ ...sheets[id], id });
+  for (const sheet of Object.values(out)) {
+    const source = sheet.pivot && out[sheet.pivot.sourceSheetId];
+    if (sheet.pivot && source) sheet.pivot.sourceRange = sanitizeRange(sheet.pivot.sourceRange, source.rows, source.cols, false);
+  }
+  return out;
+}
+
+// The sheet order after `update`. A sheet the client lists that the server lacks is kept only when
+// the update adds it, so a sheet a collaborator deleted is not brought back empty; one the server
+// holds that the client leaves out is kept unless the client removed it, so a sheet a collaborator
+// added meanwhile is not deleted. Those go last, as does an added sheet the order leaves out.
+function mergeSheetOrder(meta: DocumentMeta, update: StructureUpdate): string[] {
+  const ids = (list: unknown) => new Set(Array.isArray(list) ? list.map(String) : []);
+  const removed = ids(update.removedSheets), added = ids(update.addedSheets);
+  if (!Array.isArray(update.sheetOrder) && !removed.size && !added.size) return meta.sheetOrder;
+  const listed = Array.isArray(update.sheetOrder) ? update.sheetOrder.map(String) : meta.sheetOrder;
+  const order = [...new Set(listed)].filter((id) => !removed.has(id) && (meta.sheets[id] || added.has(id)));
+  for (const id of [...meta.sheetOrder, ...added]) if (!removed.has(id) && !order.includes(id)) order.push(id);
+  // The last sheet cannot be removed.
+  return order.length ? order : meta.sheetOrder;
+}
+
+// Whether `cells` holds exactly the cells `versions` lists, at those versions.
+function sameVersions(cells: CellMap, versions: Record<string, number>): boolean {
+  const refs = Object.keys(cells);
+  return refs.length === Object.keys(versions).length && refs.every((ref) => cells[ref].version === versions[ref]);
+}
+
+// The stored `meta` is one storage value, capped at 2 MB; a string costs up to two bytes per
+// character there. Every sheet's filter, charts, comments and pivot live in it, so this is the one
+// bound on how much of them a workbook can hold.
+const MAX_META_CHARACTERS = 900000;
+
+// A plain object's fields, or `null` for anything else (arrays included).
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
+}
+
+// Filter selections and pivot fields are compared to cell values, which are capped at this length.
+const MAX_CELL_CHARACTERS = 8192;
+function cellStrings(values: unknown[]): string[] {
+  return [...new Set(values.map((value) => String(value).slice(0, MAX_CELL_CHARACTERS)))];
+}
+
+// Clamped to the sheet, and "" when it is not a range or covers more than MAX_RANGE_CELLS.
+function sanitizeRange(text: unknown, rows: number, cols: number, allowSingle: boolean): string {
+  const match = /^([A-Z]+)([1-9]\d*)(?::([A-Z]+)([1-9]\d*))?$/.exec(String(text || "").toUpperCase());
+  if (!match || (!match[3] && !allowSingle)) return "";
+  const first = parseCsvCellRef(match[1] + match[2])!;
+  const last = match[3] ? parseCsvCellRef(match[3] + match[4])! : first;
+  const top = Math.min(first.row, last.row), left = Math.min(first.column, last.column);
+  const bottom = Math.min(Math.max(first.row, last.row), rows - 1);
+  const right = Math.min(Math.max(first.column, last.column), cols - 1);
+  if (top > bottom || left > right || (bottom - top + 1) * (right - left + 1) > MAX_RANGE_CELLS) return "";
+  return csvCellRef(top, left) + (match[3] ? ":" + csvCellRef(bottom, right) : "");
+}
+
+function isPivotAggregate(v: unknown): v is PivotAggregate { return PIVOT_AGGREGATES.includes(v as PivotAggregate); }
+function sanitizePivot(input: unknown): PivotConfig | null {
+  const pivot = asRecord(input);
+  if (!pivot || typeof pivot.sourceSheetId !== "string" || !pivot.sourceSheetId) return null;
+  const field = (v: unknown) => String(v || "").slice(0, MAX_CELL_CHARACTERS);
+  const range = String(pivot.sourceRange || "").toUpperCase();
+  return {
+    sourceSheetId: pivot.sourceSheetId.slice(0, 80),
+    // Shape only here; normalizeSheets bounds it against the source sheet.
+    sourceRange: /^[A-Z]+[1-9]\d*:[A-Z]+[1-9]\d*$/.test(range) ? range : "",
+    rowField: field(pivot.rowField),
+    columnField: field(pivot.columnField),
+    valueField: field(pivot.valueField),
+    aggregate: isPivotAggregate(pivot.aggregate) ? pivot.aggregate : "sum",
+    showRowTotals: pivot.showRowTotals !== false,
+    showColumnTotals: pivot.showColumnTotals !== false,
+    filterField: field(pivot.filterField),
+    filterValues: Array.isArray(pivot.filterValues) ? cellStrings(pivot.filterValues) : [],
+  };
+}
+
+// Charts and comments are merged by id between collaborators, so a repeated id keeps its first.
+function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => !seen.has(item.id) && !!seen.add(item.id));
+}
+
+function sanitizeComments(input: unknown): SheetComment[] {
+  if (!Array.isArray(input)) return [];
+  return uniqueById(input.flatMap((value: unknown, index): SheetComment[] => {
+    const comment = asRecord(value) || {};
+    const ref = String(comment.ref || "").toUpperCase();
+    const text = String(comment.text || "").slice(0, MAX_COMMENT_LENGTH);
+    if (!/^[A-Z]+[1-9]\d*$/.test(ref) || !text.trim()) return [];
+    return [{
+      id: String(comment.id || "comment_" + index).slice(0, 80),
+      ref,
+      text,
+      createdAt: Math.max(0, Math.round(Number(comment.createdAt)) || 0),
+      resolved: comment.resolved === true,
+    }];
+  }));
+}
+
+function isChartType(v: unknown): v is ChartType { return CHART_TYPES.includes(v as ChartType); }
+function sanitizeCharts(input: unknown, rows: number, cols: number): SheetChart[] {
+  if (!Array.isArray(input)) return [];
+  return uniqueById(input.flatMap((value: unknown, index): SheetChart[] => {
+    const chart = asRecord(value);
+    if (!chart || typeof chart.range !== "string") return [];
+    return [{
+      id: String(chart.id || "chart_" + index).slice(0, 80),
+      type: isChartType(chart.type) ? chart.type : "line",
+      range: sanitizeRange(chart.range, rows, cols, true),
+      title: String(chart.title || "").slice(0, 200),
+      xAxisTitle: String(chart.xAxisTitle || "").slice(0, 120),
+      yAxisTitle: String(chart.yAxisTitle || "").slice(0, 120),
+      legend: chart.legend !== false,
+      firstRowHeaders: chart.firstRowHeaders !== false,
+      firstColLabels: chart.firstColLabels !== false,
+      x: clampInt(chart.x, CHART_BOUNDS.minX, CHART_BOUNDS.maxX, 96),
+      y: clampInt(chart.y, CHART_BOUNDS.minY, CHART_BOUNDS.maxY, 44),
+      width: clampInt(chart.width, CHART_BOUNDS.minWidth, CHART_BOUNDS.maxWidth, 520),
+      height: clampInt(chart.height, CHART_BOUNDS.minHeight, CHART_BOUNDS.maxHeight, 320),
+    }];
+  })).slice(0, MAX_CHARTS_PER_SHEET);
+}
+
+function sanitizeFilter(input: unknown, rows: number, cols: number): SheetFilter | null {
+  const filter = asRecord(input);
+  const criteriaInput = asRecord(filter?.criteria);
+  if (!filter || !criteriaInput || !Array.isArray(filter.columns)) return null;
+  const row = clampInt(filter.row, 0, rows - 1, 0);
+  const endRow = clampInt(filter.endRow, row, rows - 1, rows - 1);
+  const columns = [...new Set(filter.columns.map(Number).filter((column) => Number.isInteger(column) && column >= 0 && column < cols))];
+  if (!columns.length) return null;
+  const criteria: Record<string, string[]> = {};
+  for (const [column, values] of Object.entries(criteriaInput)) {
+    if (/^\d+$/.test(column) && Number(column) < cols && Array.isArray(values)) criteria[column] = cellStrings(values);
+  }
+  // The rows' order before the sort, which "Clear sort" restores: only kept when it is an order of
+  // exactly the body rows, so it can never name a row outside the table.
+  const bodyRows = endRow - row;
+  const incoming = Array.isArray(filter.rowOrder) ? filter.rowOrder : [];
+  const isBodyOrder = incoming.length === bodyRows &&
+    new Set(incoming.filter((value) => Number.isInteger(value) && value > row && value <= endRow)).size === bodyRows;
+  const rowOrder: number[] = isBodyOrder ? incoming as number[] : [];
+  const sortInput = asRecord(filter.sort);
+  const sortColumn = Number(sortInput?.column);
+  const direction = sortInput?.direction;
+  const sort: SheetFilter["sort"] = Number.isInteger(sortColumn) && columns.includes(sortColumn) && (direction === "asc" || direction === "desc")
+    ? { column: sortColumn, direction }
+    : null;
+  return { row, endRow, columns, criteria, rowOrder: sort ? rowOrder : [], sort };
 }
 
 const FMT_KEYS = new Set(["b", "i", "u", "s", "c", "bg", "a", "nf", "d", "fs", "wrap"]);
