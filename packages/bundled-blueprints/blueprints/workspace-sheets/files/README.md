@@ -251,7 +251,8 @@ commas, a leading `$` or a trailing `%`. Everything else is text; date-looking t
 
 Formulas are written without cached results and the workbook requests a full recalculation on open,
 so Excel evaluates them itself. To keep them valid there, the exporter rewrites cross-sheet
-references to the exported worksheet names, prefixes OOXML "future functions" (`IFS`, `CONCAT`, ...)
+references to the exported worksheet names, converts single-quoted string literals
+(`'Complete'`) to Excel's double-quote form, prefixes OOXML "future functions" (`IFS`, `CONCAT`, ...)
 with `_xlfn.`, renames `ERRORTYPE()` to `ERROR.TYPE()`, and drops whitespace between a function
 name and its `(`. A formula that is empty, structurally unbalanced (unterminated string or quoted
 name, mismatched parentheses or brackets — the grid's parser tolerates these) or that would exceed
