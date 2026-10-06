@@ -17,6 +17,8 @@ describe("the formula tokenizer", () => {
       { t: "str", v: "it's" }, { t: "op", v: "&" }, { t: "word", v: "'Q1'!A1" },
     ]);
     expect(tokenize("''")).toEqual([{ t: "str", v: "" }]);
+    // Written back, a single-quoted literal takes the double-quoted form it means.
+    expect(serializeAst(parseFormula("'it''s'&A1"))).toBe('"it\'s"&A1');
   });
 
   it("reads a backslash as an ordinary character, as Excel does", () => {
@@ -30,6 +32,8 @@ describe("the formula tokenizer", () => {
     expect(serializeAst(parseFormula("'O''Brien'!B2+1"))).toBe("'O''Brien'!B2+1");
     expect(unquoteSheetName("'O''Brien'")).toBe("O'Brien");
     expect(unquoteSheetName("Plain")).toBe("Plain");
+    expect(unquoteSheetName("'Q1!Q2'")).toBe("Q1!Q2");
+    expect(tokenize("'Q1!Q2'!A1")).toEqual([{ t: "word", v: "'Q1!Q2'!A1" }]);
   });
 });
 

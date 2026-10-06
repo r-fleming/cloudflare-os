@@ -540,7 +540,8 @@ function makeEngine(model: Model): Engine {
   function splitRef(ref: string, defSheet: string): { sheetId: string; r: number; c: number } | null {
     let sheetId = defSheet;
     let cellPart = ref;
-    const bang = ref.indexOf("!");
+    // The last `!`: a quoted sheet name may hold one, a cell reference cannot.
+    const bang = ref.lastIndexOf("!");
     if (bang >= 0) {
       const sid = sheetByName(ref.slice(0, bang));
       if (!sid) return null;

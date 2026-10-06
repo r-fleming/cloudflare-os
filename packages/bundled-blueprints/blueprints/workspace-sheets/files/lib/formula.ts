@@ -92,7 +92,7 @@ function quotedSheetAt(src: string, start: number): boolean {
 
 /** A quoted sheet name as a formula word holds it (`'O''Brien'`), unquoted and unescaped (`O'Brien`). */
 export function unquoteSheetName(name: string): string {
-  return /^'.*'$/.test(name) ? name.slice(1, -1).replace(/''/g, "'") : name;
+  return /^'[\s\S]*'$/.test(name) ? name.slice(1, -1).replace(/''/g, "'") : name;
 }
 
 // --- Parser (produces AST) ---
