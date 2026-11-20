@@ -196,6 +196,38 @@ Collaborators share the gadget's code, storage, and AI chat history, but certain
 
 This means no collaborator implicitly gains access to another user's connected third-party accounts.
 
+## Caller sessions (`connectCaller`)
+
+A gadget can authorize per caller by defining `connectCaller(caller)` on its `Gadget` class. The Workshop then never sends a call to the `Gadget` itself. Each stub it mints to the gadget facet (`facetRpcStub` in overseer.ts) calls `connectCaller` once, on its first method call, and sends every call through that stub to the returned session. `connectCaller` can't be called through any stub. A gadget without it is called directly, as before.
+
+Every route into a gadget facet names its caller, since `getGadgetFacet` requires one:
+
+| Route | `caller` |
+| --- | --- |
+| Owner's or editor's UI (`GadgetClientImpl.connectToGadget`) | `{kind: "user", id, name, role: "owner" \| "build"}` |
+| "use" collaborator's UI (`UseGadgetClientInterface`) | `{kind: "user", …, role: "use"}` |
+| Static snapshot, for a view grant | `{kind: "user", …, role: "view"}`. The owner's and editors' snapshots name their own role. |
+| Agent `executeCode` through `env.X.rpc` (binding loopback, `from: "agent"`) | `{kind: "agent", chatId}` |
+| Another gadget's binding (`from: "gadget"`) | `{kind: "gadget", gadgetId}` |
+| Hook-originated loopback | `{kind: "system", reason: "hook"}` |
+| Export started from a person's gadget client | that person's `user` caller |
+| Export through the Exports binding | `{kind: "system", reason: "export"}` |
+
+The user's `id` and `name` come from their account profile (`whoami()`), looked up on the first call.
+
+A snapshot runs the gadget's own code, so `connectCaller` filters it like the live gadget. That closes the gap in [Static snapshots](#static-snapshots) for gadgets that opt in: a view grant sees only what the gadget's session for `role: "view"` returns.
+
+Trust: "owner", "build", "agent" and "gadget" callers can change the gadget's code or bindings, so a session can't constrain them. It only keeps them from mistakes. The boundary is for "use" and "view" callers.
+
+Still the gadget's job, or not addressed:
+
+- Session methods must check arguments against the caller and never return the `Gadget` or any object that reaches more than the caller may see.
+- Subscriptions and broadcasts must be filtered per session.
+- Bindings still read with the owner's (or binding creator's) connected accounts. Observer verification still requires a "use" collaborator to be able to read everything the gadget read, even data the gadget never shows them.
+- A gadget-to-gadget call names the calling gadget, not the person behind it.
+- Opting in is detected from the runtime's missing-method error. A static marker on the exported class would be sturdier.
+- A binding loopback mints a stub per incoming call, so `connectCaller` runs for each one. Keep it cheap.
+
 ## Authorization model
 
 Authorization is enforced at `open()`: the method computes the caller's effective access from the permission graph (`getEffectiveAccess()`), treating the owner as the implicit `build` root. A caller with no effective access receives `WORKSPACE_ACCESS_DENIED`, while an uninitialized or deleted gadget receives `WORKSPACE_NOT_FOUND`. This distinction acknowledges that an initialized workspace exists, but the denial exposes no workspace name, owner, or content. Otherwise the access selects which capability is returned (full `OverseerClientInterface` for `build`/owner, restricted `UseOverseerInterface` for `use`). (Note: `UseOverseerInterface` still throws `Unauthorized` when a *valid* `use` collaborator calls a `build`-only method -- that's a different case, where existence is already known and only the operation is denied.)

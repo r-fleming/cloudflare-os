@@ -906,6 +906,45 @@ In client code, import \`RpcTarget\` and \`RpcStub\` from "capnweb".
 
 If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:workers".
 
+## Knowing who is calling
+
+A Gadget can find out who is calling it, and show or allow each caller only what they should, by defining \`connectCaller(caller)\` on its \`Gadget\` class. Once it does, nobody can call the \`Gadget\`'s methods directly: the Workshop calls \`connectCaller\` once for each connection, and sends every call from that connection to the object it returns. This applies to every caller, not just the UI: people using the UI, snapshots, other Gadgets bound to this one, your own \`executeCode\` calls through the Gadget's \`rpc\` stub, and exports. Only the Workshop can call \`connectCaller\`.
+
+\`caller\` is one of:
+
+* \`{kind: "user", id, name, role}\`: a person. \`id\` is their account email. \`role\` is \`"owner"\` or \`"build"\` (may edit the Gadget, so trusted), \`"use"\` (may only use the UI), or \`"view"\` (sees a static snapshot, a copy of the Gadget's stored state with no bindings).
+* \`{kind: "agent", chatId}\`: you, from \`executeCode\`. Trusted like \`"build"\`.
+* \`{kind: "gadget", gadgetId}\`: another Gadget in this workspace, through a binding. Trusted like \`"build"\`.
+* \`{kind: "system", reason}\`: background work acting for the owner, such as an export with no person behind it.
+
+Use it only when the user asks for different people to see or change different things (e.g. "each rep sees only their own accounts"). Otherwise, don't define it. The pattern:
+
+\`\`\`
+import { DurableObject, RpcTarget } from "cloudflare:workers";
+
+export class Gadget extends DurableObject {
+  connectCaller(caller) {
+    if (caller.kind === "user" && (caller.role === "use" || caller.role === "view")) {
+      return new MemberSession(this, caller.id);
+    }
+    return new AdminSession(this);
+  }
+  rowsFor(email) { /* read only that person's rows from storage */ }
+}
+
+class MemberSession extends RpcTarget {
+  constructor(gadget, email) { super(); this.gadget = gadget; this.email = email; }
+  getMyRows() { return this.gadget.rowsFor(this.email); }
+}
+\`\`\`
+
+* Give each session only the methods its caller may use, and check every argument against the caller inside the session; never trust a name or ID the client sends.
+* Never return the \`Gadget\` itself, or an object that reaches data the caller may not see, from a session method.
+* Filter subscriptions per session: keep each subscriber's caller with its callback, and send each one only what it may see.
+* Throw from \`connectCaller\` to refuse a caller entirely.
+* Data from bindings is still read with the owner's connections. The Gadget decides what each caller sees of it.
+* To call the Gadget yourself from \`executeCode\`, use its \`rpc\` stub as usual: your calls go to the session returned for \`{kind: "agent"}\`.
+
 ## Legacy client.js
 
 Older Gadgets may have a legacy client.js: one with no default export, whose top-level code builds the UI directly. The Workshop still runs these, as a single module with \`gadget\`, \`RpcTarget\` and \`RpcStub\` as global variables, and a browser-mode export waits for its top-level \`await\`. A legacy client.js cannot import anything, including another file of the Gadget or "capnweb": imports require the default export with \`main()\`.

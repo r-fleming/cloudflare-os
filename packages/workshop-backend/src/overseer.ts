@@ -286,24 +286,87 @@ function gadgetModules(files: ReadonlyMap<string, string>): Record<string, strin
   return modules;
 }
 
+// The gadget method the Workshop calls to open a caller's session (see facetRpcStub).
+const CONNECT_CALLER = "connectCaller";
+
+// Ask `facet` for `caller`'s session. Resolves to null if the gadget doesn't define
+// connectCaller, so it is called directly; rejects if connectCaller throws (a refusal), failing
+// only this caller's calls.
+//
+// TODO: Opting in is detected from the runtime's error for a missing method, since a facet stub
+//   can't be asked which methods its class has. Detecting it from the gadget's code at load time
+//   (e.g. a static property on the exported class) would be sturdier.
+async function connectGadgetCaller(facet: Fetcher<DurableObject>, source: GadgetCallerSource)
+    : Promise<any | null> {
+  let caller = typeof source === "function" ? await source() : source;
+  try {
+    return await Reflect.apply(Reflect.get(facet, CONNECT_CALLER, facet), facet, [caller]);
+  } catch (err) {
+    if (err instanceof Error &&
+        err.message.includes(`does not implement the method "${CONNECT_CALLER}"`)) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+// Whom an export runs as when no person started it (the Exports binding).
+const EXPORT_CALLER: GadgetCaller = {kind: "system", reason: "export"};
+
+// The gadget caller behind a binding loopback into a gadget.
+function gadgetCallerOf(caller: GatekeeperCaller): GadgetCaller {
+  switch (caller.from) {
+    case "agent": return {kind: "agent", chatId: caller.chatId};
+    case "gadget":
+      return caller.gadgetId !== undefined
+          ? {kind: "gadget", gadgetId: caller.gadgetId}
+          // A legacy default gadget's binding names no gadget ID.
+          : {kind: "system", reason: "default-gadget"};
+    case "hook": return {kind: "system", reason: "hook"};
+    case "user": return {kind: "system", reason: "user-binding"};
+  }
+}
+
 // Wrap a gadget facet stub so it can be returned to a client. Since facet stubs currently can't
 // be sent over RPC, the stub is wrapped in a Proxy to make it look like an RpcTarget instead.
 // `onDispose` runs when the client disposes the stub, and `onError` receives each error one of
 // the gadget's methods throws, as a console log event.
-function facetRpcStub(facet: Fetcher<DurableObject>, onDispose?: () => void,
+//
+// `caller` says who will hold the stub (see GadgetCaller). If the gadget defines
+// `connectCaller(caller)`, the stub's first method call asks it for a session, and every call
+// made through the stub goes to that session instead of the gadget; a gadget without the method
+// is called directly, as before. `connectCaller` itself can't be called through any stub: only
+// the Workshop names the caller.
+function facetRpcStub(facet: Fetcher<DurableObject>, caller: GadgetCallerSource,
+                      onDispose?: () => void,
                       onError?: (event: ConsoleLogEvent) => void): RpcStub<any> {
+  // The caller's session: a stub to what connectCaller returned, or null if the gadget doesn't
+  // define connectCaller. Retried after a failure, so a refusal or a crash isn't cached.
+  let session: Promise<any> | undefined;
+  let getSession = () => session ??= connectGadgetCaller(facet, caller).catch(err => {
+    session = undefined;
+    throw err;
+  });
+
   // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
   let proxy = new Proxy(facet, {
     get(target, prop, receiver) {
       // A lease ends when the client disposes the stub. (The DO reset that severs sessions
       // releases it implicitly, by discarding this object -- and joinSession's leave is
-      // idempotent, so a double dispose is harmless.)
-      if (prop === Symbol.dispose && onDispose) {
+      // idempotent, so a double dispose is harmless.) Disposing it also disposes the caller's
+      // session, which the gadget can watch for with its own Symbol.dispose.
+      if (prop === Symbol.dispose) {
         let inner = Reflect.get(target, prop, target);
         return () => {
-          onDispose();
+          onDispose?.();
+          session?.then(s => s?.[Symbol.dispose]?.(), () => {});
           if (typeof inner === "function") Reflect.apply(inner, target, []);
         };
+      }
+
+      if (prop === CONNECT_CALLER) {
+        return () => Promise.reject(new Error(
+            `${CONNECT_CALLER}() is reserved for the Workshop, which calls it to name each caller.`));
       }
 
       // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
@@ -323,7 +386,9 @@ function facetRpcStub(facet: Fetcher<DurableObject>, onDispose?: () => void,
       //   possibly a runtime bug which needs investigation.
       // TODO: Fix exception reporting it tail workers so we can remove this hack.
       return (...args: unknown[]) => {
-        let result: Promise<unknown> = Reflect.apply(method, target, args);
+        let result: Promise<unknown> = getSession().then(s => s
+            ? Reflect.apply(Reflect.get(s, prop, s), s, args)
+            : Reflect.apply(method, target, args));
         if (!onError) return result;
         return result.catch((err: unknown) => {
           let msg = err;
@@ -962,6 +1027,31 @@ export function sanitizeMessageFormatRefs(
 // Whose session OverseerImpl.joinSession() counts: a collaborator holding a role's access. The
 // owner's sessions are never counted, since the owner is never an observer.
 type SessionHolder = {kind: CollaboratorRole, profileId: string};
+
+// Who is calling into a gadget: the argument the Workshop passes to a gadget's
+// `connectCaller(caller)` (see facetRpcStub). Every route that mints a stub to a gadget facet
+// names one -- getGadgetFacet() requires it -- so a gadget that defines connectCaller is reached
+// *only* through the per-caller session it returns, never directly:
+//
+// * "user": a person's UI connection (or snapshot view). `role` is their access: "owner" and
+//   "build" may edit the gadget's code, so they are trusted; "use" may only run the UI; "view"
+//   sees a static snapshot (no bindings) of the gadget's stored state.
+// * "agent": the workspace's agent, from executeCode in chat `chatId`. It can edit the code, so
+//   it is trusted like "build".
+// * "gadget": another gadget in this workspace, through a binding (`gadgetId` is the caller).
+//   Only owners and editors can create bindings, so it too is trusted like "build"; which person
+//   (if any) is behind the call is not propagated.
+// * "system": background work with no person behind it, acting for the owner -- an export
+//   started by the platform or the agent's Exports binding, for example. `reason` says which.
+export type GadgetCaller =
+  | {kind: "user", id: string, name: string, role: "owner" | CollaboratorRole | "view"}
+  | {kind: "agent", chatId: number}
+  | {kind: "gadget", gadgetId: WorkpieceId}
+  | {kind: "system", reason: string};
+
+// A caller, or a way to work it out -- e.g. looking up a user's profile -- deferred until the
+// gadget is first called, and skipped entirely if it never is.
+type GadgetCallerSource = GadgetCaller | (() => Promise<GadgetCaller>);
 
 // How folding a chat's content reads the base text of a worktree edit (see
 // OverseerImpl.seedWorktreeEditBases): one file of a commit as text, undefined when the commit has
@@ -5536,12 +5626,26 @@ class OverseerImpl implements AgentHooks {
   // while the retained stub kept reading. Passed by the collaborator-facing connectToGadget
   // mints; omitted for the owner's and for internal callers (binding loopbacks already live
   // inside a counted session).
-  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionHolder)
-      : Promise<RpcStub<any>> {
+  //
+  // `caller` names who will hold the stub; a gadget defining connectCaller is reached only
+  // through the session it returns for them (see GadgetCaller and facetRpcStub). It is required
+  // so no route into a gadget can forget to name one.
+  async getGadgetFacet(gadgetId: WorkpieceId, caller: GadgetCallerSource, chatId?: number,
+                       joinAs?: SessionHolder): Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
     let leaveSession = joinAs ? this.joinSession(joinAs, gadgetId) : undefined;
-    return facetRpcStub(facet, leaveSession,
+    return facetRpcStub(facet, caller, leaveSession,
         event => this.deliverGadgetLogs(chatId ?? null, [event]));
+  }
+
+  // The caller for a person's connection, with their profile looked up when first needed.
+  userCaller(clientUserId: string, role: "owner" | CollaboratorRole | "view")
+      : () => Promise<GadgetCaller> {
+    return async () => {
+      let profile = await this.wrapUserDo(this.users.get(this.users.idFromString(clientUserId)))
+          .whoami();
+      return {kind: "user", id: profile.id, name: profile.name, role};
+    };
   }
 
   // --- Static snapshots (see Overseer.getGadgetSnapshot) ---
@@ -5593,7 +5697,11 @@ class OverseerImpl implements AgentHooks {
 
   // A stub to `snapshot`'s facet, which can be returned to the client. The gadget's console
   // doesn't get its errors: they are a viewer's, not the gadget's.
-  getSnapshotFacet(snapshot: GadgetSnapshot): RpcStub<any> {
+  //
+  // A snapshot runs the gadget's own code, so a gadget defining connectCaller filters what a
+  // snapshot shows exactly as it does live: `caller` is normally a "user" with role "view".
+  // Without this, a view grant would see every row the gadget stored.
+  getSnapshotFacet(snapshot: GadgetSnapshot, caller: GadgetCallerSource): RpcStub<any> {
     return facetRpcStub(this.ctx.facets.get<DurableObject>(snapshot.facetName, () => {
       // A stub outliving its snapshot must not restart the facet, empty and unrecorded, where
       // nothing would ever delete it.
@@ -5603,7 +5711,7 @@ class OverseerImpl implements AgentHooks {
         // The gadget's own facet ID, so code reading ctx.id sees what it sees in the gadget.
         id: this.gadgetFacetName(snapshot.gadgetId),
       };
-    }));
+    }), caller);
   }
 
   // The worker a snapshot runs: its gadget's code at the snapshot's commit, with an empty env,
@@ -5646,36 +5754,41 @@ class OverseerImpl implements AgentHooks {
     return buildUiBundle(await this.readGadgetFiles(gadgetId, chatId));
   }
 
-  async getGadgetExportFormats(gadgetId: WorkpieceId, chatId?: number)
+  // `caller` is whom the export runs as: the person exporting, when there is one, so an export
+  // shows what they would see. The Exports binding (agent or gadget) has no person behind it.
+  async getGadgetExportFormats(gadgetId: WorkpieceId, chatId?: number,
+                               caller: GadgetCallerSource = EXPORT_CALLER)
       : Promise<GadgetExportFormat[]> {
     this.checkChatExistsAndMaterializeChanges(chatId);
-    return this.listExportFormats(await this.#gadgetExportSource(gadgetId, chatId));
+    return this.listExportFormats(await this.#gadgetExportSource(gadgetId, caller, chatId));
   }
 
-  async exportGadget(gadgetId: WorkpieceId, formatId: string, chatId?: number)
+  async exportGadget(gadgetId: WorkpieceId, formatId: string, chatId?: number,
+                     caller: GadgetCallerSource = EXPORT_CALLER)
       : Promise<ReadableStream<Uint8Array>> {
     this.checkChatExistsAndMaterializeChanges(chatId);
-    return this.runExport(await this.#gadgetExportSource(gadgetId, chatId), formatId);
+    return this.runExport(await this.#gadgetExportSource(gadgetId, caller, chatId), formatId);
   }
 
   // What exporting gadget `gadgetId`, as seen from `chatId`, runs.
-  async #gadgetExportSource(gadgetId: WorkpieceId, chatId?: number)
+  async #gadgetExportSource(gadgetId: WorkpieceId, caller: GadgetCallerSource, chatId?: number)
       : Promise<GadgetExportSource> {
     return {
       gadgetId,
       files: await this.readGadgetFiles(gadgetId, chatId),
       worker: () => this.loadGadgetWorker(gadgetId, chatId),
-      facet: () => this.getGadgetFacet(gadgetId, chatId),
+      facet: () => this.getGadgetFacet(gadgetId, caller, chatId),
     };
   }
 
   // What exporting `snapshot` runs: its own code and copy, never its gadget's.
-  snapshotExportSource(snapshot: GadgetSnapshot): GadgetExportSource {
+  snapshotExportSource(snapshot: GadgetSnapshot, caller: GadgetCallerSource)
+      : GadgetExportSource {
     return {
       gadgetId: snapshot.gadgetId,
       files: this.gitCache.readCommitFiles(snapshot.commitId),
       worker: () => this.#loadSnapshotWorker(snapshot),
-      facet: async () => this.getSnapshotFacet(snapshot),
+      facet: async () => this.getSnapshotFacet(snapshot, caller),
       renderMode: "snapshot",
     };
   }
@@ -6155,7 +6268,7 @@ class OverseerImpl implements AgentHooks {
           this.#getOrCreateCapturedActions(caller.chatId).accessedGadget = true;
         }
         let chatId = "chatId" in caller ? caller.chatId : undefined;
-        return this.getGadgetFacet(target.id, chatId);
+        return this.getGadgetFacet(target.id, gadgetCallerOf(caller), chatId);
       }
 
       case "gatekeeper":
@@ -13182,7 +13295,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new GadgetSnapshotClientImpl(
-        this.impl, async () => true, this.impl.createGadgetSnapshot(id));
+        this.impl, async () => true, this.impl.createGadgetSnapshot(id),
+        this.impl.userCaller(this.clientUserId, this.isOwner ? "owner" : "build"));
   }
 
   async deleteSelf(): Promise<void> {
@@ -14569,7 +14683,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
     return new GadgetSnapshotClientImpl(
-        this.impl, mayOpen, this.impl.createGadgetSnapshot(id));
+        this.impl, mayOpen, this.impl.createGadgetSnapshot(id),
+        this.impl.userCaller(this.clientUserId, "view"));
   }
 
   // --- Denied methods (build-only) ---
@@ -15189,15 +15304,20 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts exactly as this capability does (joinedAs): it can outlive this
     // object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, chatId, this.joinedAs);
+    return this.impl.getGadgetFacet(this.id, this.#caller(), chatId, this.joinedAs);
+  }
+
+  // The owner is minted with no joinedAs; everyone else here holds "build".
+  #caller() {
+    return this.impl.userCaller(this.clientUserId, this.joinedAs?.kind ?? "owner");
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
-    return this.impl.getGadgetExportFormats(this.id, chatId);
+    return this.impl.getGadgetExportFormats(this.id, chatId, this.#caller());
   }
 
   async export(formatId: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
-    return this.impl.exportGadget(this.id, formatId, chatId);
+    return this.impl.exportGadget(this.id, formatId, chatId, this.#caller());
   }
 
   async listBindings(chatId?: number): Promise<GadgetBindingInfo[]> {
@@ -15470,17 +15590,20 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts as a "use" session for its own lifetime, like this interface: it can
     // outlive this object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, undefined, {kind: "use", profileId: this.clientProfileId});
+    return this.impl.getGadgetFacet(this.id, this.impl.userCaller(this.clientUserId, "use"),
+        undefined, {kind: "use", profileId: this.clientProfileId});
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.getGadgetExportFormats(this.id);
+    return this.impl.getGadgetExportFormats(
+        this.id, undefined, this.impl.userCaller(this.clientUserId, "use"));
   }
 
   async export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.exportGadget(this.id, id);
+    return this.impl.exportGadget(
+        this.id, id, undefined, this.impl.userCaller(this.clientUserId, "use"));
   }
 
   // --- Denied methods (build-only) ---
@@ -15523,9 +15646,11 @@ class GadgetSnapshotClientImpl extends RpcTarget implements GadgetSnapshotClient
   #snapshot: GadgetSnapshot;
 
   // `mayOpen` says whether its holder may still open the gadget, checked before each refresh
-  // after the deployment's own check (see OverseerImpl.requireSnapshotSharing).
+  // after the deployment's own check (see OverseerImpl.requireSnapshotSharing). `caller` is who
+  // is viewing, passed to a gadget's connectCaller (see OverseerImpl.getSnapshotFacet).
   constructor(private impl: OverseerImpl,
-              private mayOpen: () => Promise<boolean>, snapshot: GadgetSnapshot) {
+              private mayOpen: () => Promise<boolean>, snapshot: GadgetSnapshot,
+              private caller: GadgetCallerSource) {
     super();
     this.#snapshot = snapshot;
   }
@@ -15574,17 +15699,18 @@ class GadgetSnapshotClientImpl extends RpcTarget implements GadgetSnapshotClient
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.getSnapshotFacet(this.#current);
+    return this.impl.getSnapshotFacet(this.#current, this.caller);
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.listExportFormats(this.impl.snapshotExportSource(this.#current));
+    return this.impl.listExportFormats(
+        this.impl.snapshotExportSource(this.#current, this.caller));
   }
 
   async export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.runExport(this.impl.snapshotExportSource(this.#current), id);
+    return this.impl.runExport(this.impl.snapshotExportSource(this.#current, this.caller), id);
   }
 }
 

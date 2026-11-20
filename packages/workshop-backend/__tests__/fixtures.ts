@@ -100,6 +100,9 @@ export async function openFakeOverseer(
       recordGadgetAnalytics: () => {},
       outputsSnapshot: () => [],
       wrapUserDo: (stub: unknown) => stub,
+      // Whom a gadget's connectCaller is told is calling (see OverseerImpl.userCaller).
+      userCaller: (_userId: string, role: string) =>
+          async () => ({ kind: "user", id: "profile-id", name: "Test User", role }),
       // What open() consults for a non-owner's access: the permission-graph lookup and (for
       // "build") observer verification in one. The sharing manager is still reached, but only to
       // redeem a share key, which these tests never pass.

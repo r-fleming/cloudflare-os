@@ -171,7 +171,7 @@ describe("gadget snapshots", () => {
   it("copy the gadget's state, and keep each side's later writes apart until refreshed", () =>
       withImpl(workspace(), async impl => {
     await seedGadget(impl, GADGET_ID);
-    using gadget = await impl.getGadgetFacet(GADGET_ID);
+    using gadget = await impl.getGadgetFacet(GADGET_ID, { kind: "system", reason: "test" });
     await gadget.write("note", "original");
     using client = await openViewer(impl);
     using snapshot: GadgetSnapshotClient = await client.getGadgetSnapshot(GADGET_ID);
@@ -197,7 +197,7 @@ describe("gadget snapshots", () => {
   it("reach nothing the gadget can: no env, and no capability the gadget stored", () =>
       withImpl(workspace(), async impl => {
     await seedGadget(impl, GADGET_ID);
-    using gadget = await impl.getGadgetFacet(GADGET_ID);
+    using gadget = await impl.getGadgetFacet(GADGET_ID, { kind: "system", reason: "test" });
     await gadget.storeCallback();
     expect(await gadget.pingStoredCallback()).toBe("pong");
     expect(await gadget.envKeys()).toContain("GADGET");
@@ -265,7 +265,7 @@ describe("gadget snapshots", () => {
         description: { title: "Read", description: "Cached data", subresources: ["document"] },
       });
     }
-    using gadget = await impl.getGadgetFacet(GADGET_ID);
+    using gadget = await impl.getGadgetFacet(GADGET_ID, { kind: "system", reason: "test" });
     await gadget.write("note", "cached data");
     using client = await openViewer(impl);
 
@@ -321,7 +321,7 @@ describe("gadget snapshots", () => {
   it("are refused everyone while the deployment forbids them, and open again once allowed", () =>
       withImpl(workspace(), async impl => {
     await seedGadget(impl, GADGET_ID);
-    using gadget = await impl.getGadgetFacet(GADGET_ID);
+    using gadget = await impl.getGadgetFacet(GADGET_ID, { kind: "system", reason: "test" });
     await gadget.write("note", "original");
     using viewer = await openViewer(impl);
     using owner = await openOwner(impl);
@@ -388,7 +388,7 @@ describe("gadget snapshots", () => {
     let facetName = "";
     await withImpl(stub, async impl => {
       await seedGadget(impl, GADGET_ID);
-      using gadget = await impl.getGadgetFacet(GADGET_ID);
+      using gadget = await impl.getGadgetFacet(GADGET_ID, { kind: "system", reason: "test" });
       await gadget.write("note", "original");
       facetName = impl.createGadgetSnapshot(GADGET_ID).facetName;
       await impl.ctx.storage.sync();
@@ -403,7 +403,7 @@ describe("gadget snapshots", () => {
       using copy = impl.getSnapshotFacet({
         facetName, gadgetId: GADGET_ID, commitId: impl.getGadgetHead(GADGET_ID)!,
         refreshedAt: new Date(),
-      });
+      }, { kind: "system", reason: "test" });
       expect(await copy.read("note")).toBeNull();
     });
   });

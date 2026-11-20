@@ -73,7 +73,7 @@ async function withGadget(fn: (impl: any) => Promise<void>): Promise<void> {
 describe("gadget ctx.restore()", () => {
   it("works through the stub getGadgetFacet hands out, and the result survives storage",
       () => withGadget(async impl => {
-    using gadget = await impl.getGadgetFacet(GADGET_ID);
+    using gadget = await impl.getGadgetFacet(GADGET_ID, { kind: "system", reason: "test" });
     using callback = await gadget.mintCallback("a");
     expect(await callback.ping()).toBe("pong:a");
 
@@ -87,7 +87,7 @@ describe("gadget ctx.restore()", () => {
   it("is refused through a bare facet stub (what the fix guards against)",
       () => withGadget(async impl => {
     // Start the facet the supported way, then reach the same running facet directly.
-    using gadget = await impl.getGadgetFacet(GADGET_ID);
+    using gadget = await impl.getGadgetFacet(GADGET_ID, { kind: "system", reason: "test" });
     using callback = await gadget.mintCallback("a");
     expect(await callback.ping()).toBe("pong:a");
 
